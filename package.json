@@ -1,0 +1,9 @@
+{
+  "name": "khanom-planner",
+  "version": "1.0.0",
+  "description": "ระบบวางแผนปริมาณขนมรายวัน คำนวณจากประวัติการขายด้วยค่าเฉลี่ยเลขคณิตและส่วนเบี่ยงเบนมาตรฐาน",
+  "scripts": {
+    "test": "node test/stats.test.js"
+  },
+  "license": "MIT"
+}

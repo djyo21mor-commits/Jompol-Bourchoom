@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ระบบวางแผนปริมาณขนม</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="app-header">
+    <h1>🍡 ระบบวางแผนปริมาณขนม</h1>
+    <p class="subtitle">คำนวณว่าแต่ละวันควรทำขนมกี่ชิ้น จากประวัติการขายย้อนหลัง</p>
+  </header>
+
+  <main class="container">
+
+    <!-- แผงตั้งค่าการคำนวณ -->
+    <section class="card settings-card">
+      <h2>⚙️ ตั้งค่าการคำนวณ</h2>
+
+      <div class="setting-row">
+        <label for="serviceLevel">
+          ความมั่นใจว่าขนมจะพอขาย
+          <span class="hint">ยิ่งสูง = ทำเผื่อมาก โอกาสขนมขาดน้อย แต่เสี่ยงเหลือ</span>
+        </label>
+        <div class="slider-wrap">
+          <input type="range" id="serviceLevel" min="50" max="99" step="1" value="85">
+          <output id="serviceLevelOut">85%</output>
+        </div>
+      </div>
+
+      <div class="setting-row checkbox-row">
+        <label>
+          <input type="checkbox" id="byWeekday">
+          คิดแยกตามวันในสัปดาห์ (เช่น วันเสาร์ขายดีกว่าวันจันทร์)
+        </label>
+      </div>
+
+      <div class="setting-row" id="weekdayRow" style="display:none;">
+        <label for="targetWeekday">วันที่จะไปขาย</label>
+        <select id="targetWeekday"></select>
+      </div>
+    </section>
+
+    <!-- รายการขนม -->
+    <section id="productList"></section>
+
+    <!-- เพิ่มขนมใหม่ -->
+    <section class="card add-product-card">
+      <h2>➕ เพิ่มชนิดขนม</h2>
+      <form id="addProductForm" class="inline-form">
+        <input type="text" id="newProductName" placeholder="ชื่อขนม เช่น ขนมครก" required>
+        <input type="text" id="newProductUnit" placeholder="หน่วย เช่น ชิ้น / ถุง" value="ชิ้น">
+        <button type="submit">เพิ่มขนม</button>
+      </form>
+    </section>
+
+    <!-- จัดการข้อมูล -->
+    <section class="card data-card">
+      <h2>💾 จัดการข้อมูล</h2>
+      <p class="hint">ข้อมูลถูกเก็บไว้ในเบราว์เซอร์ของคุณเครื่องนี้ ควรสำรองไฟล์ไว้เป็นระยะ</p>
+      <div class="button-group">
+        <button id="exportBtn" class="secondary">⬇️ ดาวน์โหลดข้อมูลสำรอง</button>
+        <label class="btn-file secondary">
+          ⬆️ นำเข้าข้อมูลสำรอง
+          <input type="file" id="importInput" accept="application/json" hidden>
+        </label>
+        <button id="loadSampleBtn" class="secondary">🎲 ใส่ข้อมูลตัวอย่าง</button>
+        <button id="clearBtn" class="danger">🗑️ ล้างข้อมูลทั้งหมด</button>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="app-footer">
+    <p>คำนวณด้วยค่าเฉลี่ยเลขคณิต และส่วนเบี่ยงเบนมาตรฐาน</p>
+  </footer>
+
+  <script src="js/stats.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
