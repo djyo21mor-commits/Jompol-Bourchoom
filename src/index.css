@@ -1,0 +1,218 @@
+@import 'tailwindcss';
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ---------------------------------------------------------------------------
+   โทนสีของแอป — โทนอบอุ่นแบบร้านเบเกอรี่
+   สีของกราฟใช้ชุดสีที่ผ่านการตรวจ contrast/ตาบอดสีแล้ว (ดู scripts/check-palette)
+--------------------------------------------------------------------------- */
+:root {
+  color-scheme: light;
+
+  --c-plane: #f8f4ee;
+  --c-surface: #ffffff;
+  --c-surface-2: #f3ede4;
+  --c-surface-3: #eae1d4;
+  --c-line: #e6dcce;
+  --c-line-strong: #d6c8b5;
+
+  --c-ink: #1c1512;
+  --c-ink-2: #63564d;
+  --c-ink-3: #8d7f73;
+
+  --c-brand: #a94d27;
+  --c-brand-hover: #8f3f1f;
+  --c-brand-ink: #ffffff;
+  --c-brand-soft: #fbeee6;
+
+  --c-good: #0ca30c;
+  --c-good-ink: #056b05;
+  --c-warn: #fab219;
+  --c-warn-ink: #8a5a00;
+  --c-bad: #d03b3b;
+  --c-bad-ink: #a72222;
+
+  --c-s1: #2a78d6;
+  --c-s2: #eb6834;
+  --c-s3: #1baf7a;
+  --c-s4: #eda100;
+  --c-s5: #e87ba4;
+
+  --c-grid: #e8e2d8;
+  --c-axis: #cabfb1;
+}
+
+.dark {
+  color-scheme: dark;
+
+  --c-plane: #14110f;
+  --c-surface: #1e1a17;
+  --c-surface-2: #272220;
+  --c-surface-3: #322b27;
+  --c-line: #362e29;
+  --c-line-strong: #4a403a;
+
+  --c-ink: #f8f4ef;
+  --c-ink-2: #c4b8ad;
+  --c-ink-3: #968a7e;
+
+  --c-brand: #e0784a;
+  --c-brand-hover: #ee8858;
+  --c-brand-ink: #1a0f09;
+  --c-brand-soft: #33211a;
+
+  --c-good: #0ca30c;
+  --c-good-ink: #45c945;
+  --c-warn: #fab219;
+  --c-warn-ink: #f0bd4c;
+  --c-bad: #d03b3b;
+  --c-bad-ink: #f08080;
+
+  --c-s1: #3987e5;
+  --c-s2: #d95926;
+  --c-s3: #199e70;
+  --c-s4: #c98500;
+  --c-s5: #d55181;
+
+  --c-grid: #2e2723;
+  --c-axis: #443b35;
+}
+
+@theme inline {
+  --font-sans:
+    'Noto Sans Thai', system-ui, -apple-system, 'Segoe UI', sans-serif;
+
+  --color-plane: var(--c-plane);
+  --color-surface: var(--c-surface);
+  --color-surface-2: var(--c-surface-2);
+  --color-surface-3: var(--c-surface-3);
+  --color-line: var(--c-line);
+  --color-line-strong: var(--c-line-strong);
+
+  --color-ink: var(--c-ink);
+  --color-ink-2: var(--c-ink-2);
+  --color-ink-3: var(--c-ink-3);
+
+  --color-brand: var(--c-brand);
+  --color-brand-hover: var(--c-brand-hover);
+  --color-brand-ink: var(--c-brand-ink);
+  --color-brand-soft: var(--c-brand-soft);
+
+  --color-good: var(--c-good);
+  --color-good-ink: var(--c-good-ink);
+  --color-warn: var(--c-warn);
+  --color-warn-ink: var(--c-warn-ink);
+  --color-bad: var(--c-bad);
+  --color-bad-ink: var(--c-bad-ink);
+
+  --color-s1: var(--c-s1);
+  --color-s2: var(--c-s2);
+  --color-s3: var(--c-s3);
+  --color-s4: var(--c-s4);
+  --color-s5: var(--c-s5);
+
+  --color-grid: var(--c-grid);
+  --color-axis: var(--c-axis);
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-plane text-ink font-sans antialiased;
+    /* กันหน้าจอกระตุกตอนแป้นพิมพ์เด้งขึ้นบนมือถือ */
+    overscroll-behavior-y: none;
+  }
+
+  /* ตัวเลขในตารางให้เรียงตรงกัน */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+
+  button,
+  [role='button'] {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-brand;
+  }
+
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
+
+  /* ซ่อนลูกศรของ input number บนเดสก์ท็อป — กรอกตัวเลขบนมือถือสะดวกกว่า */
+  input[type='number']::-webkit-outer-spin-button,
+  input[type='number']::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type='number'] {
+    -moz-appearance: textfield;
+  }
+}
+
+/* ปุ่มพื้นฐาน — ประกาศเป็น utility เพื่อให้คลาสลูกนำไป @apply ต่อได้ */
+@utility btn {
+  @apply inline-flex items-center justify-center gap-1.5 rounded-xl px-4 py-2.5
+         text-[15px] font-semibold transition-colors disabled:opacity-45
+         disabled:pointer-events-none select-none;
+}
+
+@layer components {
+  .card {
+    @apply bg-surface border border-line rounded-2xl;
+  }
+
+  .field {
+    @apply w-full rounded-xl border border-line bg-surface px-3 py-2.5 text-[15px]
+           text-ink placeholder:text-ink-3 focus:border-brand focus:outline-none;
+  }
+
+  .label {
+    @apply block text-[13px] font-medium text-ink-2 mb-1.5;
+  }
+
+  .btn-primary {
+    @apply btn bg-brand text-brand-ink hover:bg-brand-hover;
+  }
+  .btn-ghost {
+    @apply btn bg-surface-2 text-ink hover:bg-surface-3;
+  }
+  .btn-outline {
+    @apply btn border border-line bg-surface text-ink hover:bg-surface-2;
+  }
+  .btn-danger {
+    @apply btn bg-bad text-white hover:opacity-90;
+  }
+  /* ประกาศทีหลังเพื่อให้ทับ padding ของปุ่มขนาดปกติได้ */
+  .btn-sm {
+    @apply px-3 py-1.5 text-[13px] rounded-lg;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[12px] font-medium;
+  }
+}
+
+/* แถบเลื่อนบางๆ ให้ดูสะอาดบนเดสก์ท็อป */
+@media (pointer: fine) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--c-line-strong) transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -1,0 +1,885 @@
+import type {
+  BaseUnit,
+  ChatMessage,
+  CoreState,
+  Item,
+  Lot,
+  Recipe,
+} from '../types'
+import { CATEGORY_LABEL } from '../types'
+import type { ParsedCommand } from './parser'
+import { guessCategory } from './parser'
+import { finishedStock, recipeCost, sellableLots, suggestPrice } from './calc'
+import { addDays, costText, dayLabel, money, num, qtyText, qtyTextFull, today } from './format'
+import { costUnitFor } from './units'
+
+/* ===========================================================================
+   ตัวลงมือทำจริง: รับคำสั่งที่แปลแล้ว -> แก้ข้อมูล -> ตอบกลับในแชท
+   ทุกฟังก์ชันเป็น pure: รับ CoreState เดิม คืน CoreState ใหม่ (ไม่แก้ของเดิม)
+=========================================================================== */
+
+export function uid(prefix = ''): string {
+  const rand =
+    typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID().slice(0, 8)
+      : Math.random().toString(36).slice(2, 10)
+  return `${prefix}${Date.now().toString(36)}${rand}`
+}
+
+export interface RunResult {
+  core: CoreState
+  messages: ChatMessage[]
+  /** true เมื่อคำสั่งนี้ทำให้ข้อมูลเปลี่ยน (ใช้ตัดสินว่าจะโชว์ปุ่มย้อนกลับไหม) */
+  changed: boolean
+}
+
+function botMsg(
+  text: string,
+  opts: Partial<Pick<ChatMessage, 'tone' | 'details' | 'actions' | 'undoable'>> = {},
+): ChatMessage {
+  return { id: uid('m'), role: 'bot', text, at: new Date().toISOString(), tone: 'info', ...opts }
+}
+
+/* --------------------------------------------------------------------------
+   ค้นหาโดยชื่อแบบยืดหยุ่น
+-------------------------------------------------------------------------- */
+
+function norm(s: string): string {
+  return s.toLowerCase().replace(/[\s.·]/g, '')
+}
+
+/** หาโดยชื่อ: ตรงเป๊ะก่อน แล้วค่อยหาแบบมีคำนั้นอยู่ข้างใน เลือกชื่อที่เจาะจงที่สุด */
+export function findByName<T extends { name: string }>(list: T[], name: string): T | undefined {
+  const n = norm(name)
+  if (!n) return undefined
+  const exact = list.find((x) => norm(x.name) === n)
+  if (exact) return exact
+  const loose = list.filter((x) => {
+    const xn = norm(x.name)
+    return xn.includes(n) || (n.includes(xn) && xn.length >= 3)
+  })
+  if (!loose.length) return undefined
+  return [...loose].sort((a, b) => norm(b.name).length - norm(a.name).length)[0]
+}
+
+/* --------------------------------------------------------------------------
+   ซื้อของเข้าร้าน
+-------------------------------------------------------------------------- */
+
+const BASE_NAME: Record<BaseUnit, string> = { g: 'น้ำหนัก (กรัม)', ml: 'ปริมาตร (มิลลิลิตร)', pcs: 'จำนวนชิ้น' }
+
+function applyPurchase(core: CoreState, cmd: Extract<ParsedCommand, { kind: 'purchase' }>, date: string): RunResult {
+  const existing = findByName(core.items, cmd.name)
+
+  if (existing && existing.base !== cmd.base) {
+    return {
+      core,
+      changed: false,
+      messages: [
+        botMsg(`หน่วยไม่ตรงกับที่เคยบันทึกไว้`, {
+          tone: 'error',
+          details: [
+            { label: 'ของในระบบ', value: `${existing.name} — เก็บเป็น${BASE_NAME[existing.base]}` },
+            { label: 'ที่พิมพ์มา', value: `${BASE_NAME[cmd.base]}` },
+          ],
+          actions: [{ kind: 'openItem', label: 'เปิดดูของชิ้นนี้', itemId: existing.id }],
+        }),
+        botMsg('ถ้าเป็นคนละอย่างกัน ให้ตั้งชื่อให้ต่างกัน เช่น "มะม่วงลูก" กับ "มะม่วงเนื้อ" แล้วพิมพ์ใหม่อีกครั้ง', {
+          tone: 'info',
+        }),
+      ],
+    }
+  }
+
+  const unitCost = cmd.total / cmd.qty
+  let item: Item
+  let items: Item[]
+
+  if (existing) {
+    const newStock = Math.max(0, existing.stock) + cmd.qty
+    const newAvg = (Math.max(0, existing.stock) * existing.avgCost + cmd.total) / newStock
+    item = {
+      ...existing,
+      stock: newStock,
+      avgCost: newAvg,
+      lastCost: unitCost,
+      // ของนับชิ้นที่เคยไม่รู้หน่วยเรียก ให้ยึดตามที่พิมพ์ล่าสุด
+      unitLabel: existing.base === 'pcs' && existing.unitLabel === 'ชิ้น' ? cmd.unitLabel : existing.unitLabel,
+    }
+    items = core.items.map((i) => (i.id === item.id ? item : i))
+  } else {
+    item = {
+      id: uid('i'),
+      name: cmd.name,
+      category: cmd.category,
+      base: cmd.base,
+      unitLabel: cmd.unitLabel,
+      stock: cmd.qty,
+      avgCost: unitCost,
+      lastCost: unitCost,
+      createdAt: new Date().toISOString(),
+    }
+    items = [...core.items, item]
+  }
+
+  const purchase = {
+    id: uid('p'),
+    date,
+    itemId: item.id,
+    itemName: item.name,
+    qty: cmd.qty,
+    total: cmd.total,
+    unitCost,
+    note: cmd.raw,
+    createdAt: new Date().toISOString(),
+  }
+
+  const details = [
+    { label: 'หมวดหมู่', value: CATEGORY_LABEL[item.category] },
+    {
+      label: 'จำนวนที่ซื้อ',
+      value: cmd.packNote
+        ? `${qtyText(cmd.qty, cmd.base, cmd.unitLabel)} (${cmd.packNote})`
+        : qtyTextFull(cmd.qty, cmd.base, cmd.unitLabel),
+    },
+    { label: 'ราคารวม', value: money(cmd.total) },
+    { label: 'ต้นทุนต่อหน่วย', value: costText(unitCost, cmd.base, cmd.unitLabel) },
+    { label: 'คงเหลือในสต็อก', value: qtyTextFull(item.stock, item.base, item.unitLabel) },
+  ]
+  if (existing && Math.abs(existing.avgCost - unitCost) > 1e-9 && existing.stock > 0) {
+    const u = costUnitFor(item.base, item.unitLabel)
+    details.push({
+      label: 'ต้นทุนเฉลี่ยใหม่',
+      value: `${num(item.avgCost * u.factor, 2)} บาท/${u.label} (เดิม ${num(existing.avgCost * u.factor, 2)})`,
+    })
+  }
+
+  return {
+    core: { ...core, items, purchases: [purchase, ...core.purchases] },
+    changed: true,
+    messages: [
+      botMsg(`บันทึกแล้ว · ${item.name}`, {
+        tone: 'ok',
+        details,
+        undoable: true,
+        actions: [{ kind: 'openItem', label: 'เปิดดูในสต็อก', itemId: item.id }],
+      }),
+    ],
+  }
+}
+
+/* --------------------------------------------------------------------------
+   สร้าง / แก้สูตร
+-------------------------------------------------------------------------- */
+
+function applyRecipe(core: CoreState, cmd: Extract<ParsedCommand, { kind: 'recipe' }>): RunResult {
+  let items = [...core.items]
+  const created: string[] = []
+  const lines: Recipe['lines'] = []
+
+  for (const ing of cmd.ingredients) {
+    let item = findByName(items, ing.name)
+    if (item && item.base !== ing.base) {
+      return {
+        core,
+        changed: false,
+        messages: [
+          botMsg(`"${item.name}" ในระบบเก็บเป็น${BASE_NAME[item.base]} แต่ในสูตรพิมพ์เป็น${BASE_NAME[ing.base]}`, {
+            tone: 'error',
+          }),
+        ],
+      }
+    }
+    if (!item) {
+      item = {
+        id: uid('i'),
+        name: ing.name,
+        category: guessCategory(ing.name),
+        base: ing.base,
+        unitLabel: ing.unitLabel,
+        stock: 0,
+        avgCost: 0,
+        lastCost: 0,
+        createdAt: new Date().toISOString(),
+      }
+      items = [...items, item]
+      created.push(item.name)
+    }
+    lines.push({ itemId: item.id, qty: ing.qty })
+  }
+
+  const existing = findByName(core.recipes, cmd.name)
+  const recipe: Recipe = existing
+    ? { ...existing, yieldQty: cmd.yieldQty, yieldUnit: cmd.yieldUnit, lines }
+    : {
+        id: uid('r'),
+        name: cmd.name,
+        yieldQty: cmd.yieldQty,
+        yieldUnit: cmd.yieldUnit,
+        lines,
+        overhead: { ...core.settings.defaultOverhead },
+        marginPct: core.settings.defaultMarginPct,
+        price: 0,
+        createdAt: new Date().toISOString(),
+      }
+
+  const recipes = existing ? core.recipes.map((r) => (r.id === recipe.id ? recipe : r)) : [...core.recipes, recipe]
+  const nextCore = { ...core, items, recipes }
+  const cost = recipeCost(recipe, items)
+
+  const messages: ChatMessage[] = [
+    botMsg(`${existing ? 'แก้สูตรแล้ว' : 'สร้างสูตรใหม่แล้ว'} · ${recipe.name}`, {
+      tone: 'ok',
+      undoable: true,
+      details: [
+        { label: 'ทำ 1 รอบได้', value: `${num(recipe.yieldQty)} ${recipe.yieldUnit}` },
+        { label: 'ส่วนผสม', value: `${lines.length} รายการ` },
+        { label: `ค่าวัตถุดิบต่อ${recipe.yieldUnit}`, value: money(cost.materialPerUnit, 2) },
+        {
+          label: `ต้นทุนรวมต่อ${recipe.yieldUnit}`,
+          value: `${money(cost.costPerUnit, 2)} (รวมค่าแรง/ค่าน้ำ/ค่าไฟที่ตั้งไว้)`,
+        },
+      ],
+      actions: [{ kind: 'openRecipe', label: 'เปิดตั้งค่าเมนู', recipeId: recipe.id }],
+    }),
+  ]
+  if (created.length) {
+    messages.push(
+      botMsg(`เพิ่มวัตถุดิบใหม่ให้ ${created.length} รายการ: ${created.join(', ')}`, {
+        tone: 'warn',
+        details: [{ label: 'ยังไม่รู้ราคา', value: 'พิมพ์บันทึกการซื้อของพวกนี้ เพื่อให้คิดต้นทุนได้ครบ' }],
+      }),
+    )
+  }
+  return { core: nextCore, messages, changed: true }
+}
+
+/* --------------------------------------------------------------------------
+   ผลิตขนม
+-------------------------------------------------------------------------- */
+
+function missingRecipeMsg(name: string): ChatMessage {
+  return botMsg(`ยังไม่มีเมนู "${name}" ในระบบ`, {
+    tone: 'warn',
+    details: [
+      {
+        label: 'สร้างจากแชทได้เลย',
+        value: `สูตร${name} ได้ 20 กล่อง ใช้ มะม่วง 1500 กรัม, แป้งเค้ก 800 กรัม, กล่อง p39 20 กล่อง`,
+      },
+    ],
+    actions: [{ kind: 'openRecipe', label: `สร้างเมนู "${name}"`, name }],
+  })
+}
+
+export function produce(core: CoreState, recipe: Recipe, qty: number, date: string): RunResult {
+  const scale = recipe.yieldQty > 0 ? qty / recipe.yieldQty : 0
+  const cost = recipeCost(recipe, core.items, scale)
+
+  const usedById = new Map(cost.lines.map((l) => [l.itemId, l]))
+  const items = core.items.map((i) => {
+    const line = usedById.get(i.id)
+    return line ? { ...i, stock: i.stock - line.qty } : i
+  })
+
+  const production = {
+    id: uid('pr'),
+    date,
+    recipeId: recipe.id,
+    recipeName: recipe.name,
+    qty,
+    unit: recipe.yieldUnit,
+    used: cost.lines.map((l) => ({
+      itemId: l.itemId,
+      itemName: l.name,
+      qty: l.qty,
+      base: l.base,
+      unitLabel: l.unitLabel,
+      cost: l.cost,
+    })),
+    materialCost: cost.materialCost,
+    overhead: {
+      labor: recipe.overhead.labor * scale,
+      water: recipe.overhead.water * scale,
+      electric: recipe.overhead.electric * scale,
+      misc: recipe.overhead.misc * scale,
+    },
+    overheadCost: cost.overheadCost,
+    totalCost: cost.totalCost,
+    costPerUnit: cost.costPerUnit,
+    createdAt: new Date().toISOString(),
+  }
+
+  const lot: Lot = {
+    id: uid('l'),
+    recipeId: recipe.id,
+    recipeName: recipe.name,
+    unit: recipe.yieldUnit,
+    date,
+    sellDate: date,
+    qty,
+    remaining: qty,
+    costPerUnit: cost.costPerUnit,
+    carriedOver: false,
+    createdAt: new Date().toISOString(),
+  }
+
+  const suggestion = suggestPrice(
+    cost.costPerUnit,
+    recipe.marginPct || core.settings.defaultMarginPct,
+    core.settings.priceMode,
+    core.settings.priceRounding,
+  )
+  const priceLabel = recipe.price > 0 ? money(recipe.price) : `${money(suggestion.price)} (แนะนำ)`
+
+  const messages: ChatMessage[] = [
+    botMsg(`ผลิตแล้ว · ${recipe.name} ${num(qty)} ${recipe.yieldUnit}`, {
+      tone: 'ok',
+      undoable: true,
+      details: [
+        { label: 'ค่าวัตถุดิบ', value: money(cost.materialCost, 2) },
+        { label: 'ค่าแรง/น้ำ/ไฟ/จิปาถะ', value: money(cost.overheadCost, 2) },
+        { label: 'ต้นทุนรวม', value: money(cost.totalCost, 2) },
+        { label: `ต้นทุนต่อ${recipe.yieldUnit}`, value: money(cost.costPerUnit, 2) },
+        { label: 'ราคาขาย', value: priceLabel },
+      ],
+      actions: [{ kind: 'openRecipe', label: 'ดูรายละเอียดเมนู', recipeId: recipe.id }],
+    }),
+    botMsg('ตัดสต็อกวัตถุดิบแล้ว', {
+      tone: 'info',
+      details: cost.lines.map((l) => {
+        const after = l.available - l.qty
+        return {
+          label: l.name,
+          value: `ใช้ ${qtyText(l.qty, l.base, l.unitLabel)} · เหลือ ${qtyText(after, l.base, l.unitLabel)}`,
+        }
+      }),
+    }),
+  ]
+
+  const short = cost.lines.filter((l) => !l.enough)
+  if (short.length) {
+    messages.push(
+      botMsg('สต็อกติดลบ — น่าจะยังไม่ได้บันทึกการซื้อของพวกนี้', {
+        tone: 'warn',
+        details: short.map((l) => ({
+          label: l.name,
+          value: `ขาดอีก ${qtyText(l.qty - l.available, l.base, l.unitLabel)}`,
+        })),
+      }),
+    )
+  }
+  if (cost.unpriced.length) {
+    messages.push(
+      botMsg(`ยังไม่รู้ราคาของ ${cost.unpriced.join(', ')} — ต้นทุนที่คิดได้จึงยังไม่ครบ`, { tone: 'warn' }),
+    )
+  }
+
+  return {
+    core: { ...core, items, productions: [production, ...core.productions], lots: [lot, ...core.lots] },
+    messages,
+    changed: true,
+  }
+}
+
+function applyProduce(core: CoreState, cmd: Extract<ParsedCommand, { kind: 'produce' }>, date: string): RunResult {
+  const recipe = findByName(core.recipes, cmd.name)
+  if (!recipe) return { core, changed: false, messages: [missingRecipeMsg(cmd.name)] }
+  if (!recipe.lines.length) {
+    return {
+      core,
+      changed: false,
+      messages: [
+        botMsg(`เมนู "${recipe.name}" ยังไม่ได้ใส่ส่วนผสม จึงคิดต้นทุนไม่ได้`, {
+          tone: 'warn',
+          actions: [{ kind: 'openRecipe', label: 'ใส่ส่วนผสม', recipeId: recipe.id }],
+        }),
+      ],
+    }
+  }
+  return produce(core, recipe, cmd.qty, date)
+}
+
+/* --------------------------------------------------------------------------
+   ขายขนม
+-------------------------------------------------------------------------- */
+
+/** ตัดขนมออกจากล็อตแบบเก่าก่อน (FIFO) — ของยกมาจะถูกขายก่อนเสมอ */
+function consumeLots(
+  lots: Lot[],
+  recipeId: string,
+  qty: number,
+  date: string,
+): { lots: Lot[]; taken: number; cost: number; originalCost: number; lotIds: string[] } {
+  const queue = sellableLots(lots, recipeId, date)
+  let left = qty
+  let cost = 0
+  let originalCost = 0
+  const lotIds: string[] = []
+  const updates = new Map<string, number>()
+
+  for (const lot of queue) {
+    if (left <= 1e-9) break
+    const take = Math.min(lot.remaining, left)
+    left -= take
+    cost += take * lot.costPerUnit
+    originalCost += take * (lot.originalCostPerUnit ?? lot.costPerUnit)
+    lotIds.push(lot.id)
+    updates.set(lot.id, lot.remaining - take)
+  }
+
+  const next = lots.map((l) => (updates.has(l.id) ? { ...l, remaining: updates.get(l.id)! } : l))
+  return { lots: next, taken: qty - left, cost, originalCost, lotIds }
+}
+
+function applySell(core: CoreState, cmd: Extract<ParsedCommand, { kind: 'sell' }>, date: string): RunResult {
+  const recipe = findByName(core.recipes, cmd.name)
+  if (!recipe) return { core, changed: false, messages: [missingRecipeMsg(cmd.name)] }
+
+  const available = finishedStock(core.lots, recipe.id, date)
+  const cost = recipeCost(recipe, core.items)
+  const suggestion = suggestPrice(
+    cost.costPerUnit,
+    recipe.marginPct || core.settings.defaultMarginPct,
+    core.settings.priceMode,
+    core.settings.priceRounding,
+  )
+  const unitPrice = cmd.unitPrice ?? (recipe.price > 0 ? recipe.price : suggestion.price)
+
+  if (unitPrice <= 0) {
+    return {
+      core,
+      changed: false,
+      messages: [
+        botMsg(`ยังไม่รู้ราคาขายของ "${recipe.name}"`, {
+          tone: 'warn',
+          details: [{ label: 'พิมพ์ราคาต่อท้ายได้', value: `ขาย${recipe.name} ${num(cmd.qty)} ${cmd.unit} กล่องละ 120` }],
+          actions: [{ kind: 'openRecipe', label: 'ตั้งราคาขาย', recipeId: recipe.id }],
+        }),
+      ],
+    }
+  }
+
+  const sellQty = Math.min(cmd.qty, available)
+  const shortfall = cmd.qty - sellQty
+  const messages: ChatMessage[] = []
+
+  if (sellQty <= 0) {
+    // ของที่ยกไปขายวันหลังยังนับไม่ได้ในวันนี้ — บอกให้ชัด ไม่งั้นผู้ใช้งงว่าของหายไปไหน
+    const waiting = core.lots.filter((l) => l.recipeId === recipe.id && l.remaining > 1e-9 && l.sellDate > date)
+    const waitingQty = waiting.reduce((s, l) => s + l.remaining, 0)
+    messages.push(
+      botMsg(`ยังไม่มี "${recipe.name}" พร้อมขายใน${dayLabel(date)}`, {
+        tone: 'warn',
+        details: [
+          { label: 'พร้อมขายตอนนี้', value: `0 ${recipe.yieldUnit}` },
+          ...(waitingQty > 0
+            ? [
+                {
+                  label: 'เตรียมไว้ขายวันหลัง',
+                  value: `${num(waitingQty)} ${recipe.yieldUnit} · พร้อมขาย${dayLabel(waiting[0].sellDate)}`,
+                },
+              ]
+            : []),
+        ],
+        actions: [
+          {
+            kind: 'produceThenSell',
+            label: `บันทึกผลิต ${num(cmd.qty)} ${recipe.yieldUnit} แล้วขาย`,
+            recipeId: recipe.id,
+            produceQty: cmd.qty,
+            sellQty: cmd.qty,
+            unitPrice,
+          },
+        ],
+      }),
+    )
+    return { core, changed: false, messages }
+  }
+
+  const taken = consumeLots(core.lots, recipe.id, sellQty, date)
+  const revenue = sellQty * unitPrice
+  const sale = {
+    id: uid('s'),
+    date,
+    recipeId: recipe.id,
+    recipeName: recipe.name,
+    qty: sellQty,
+    unit: recipe.yieldUnit,
+    unitPrice,
+    revenue,
+    cost: taken.cost,
+    lotIds: taken.lotIds,
+    createdAt: new Date().toISOString(),
+  }
+
+  const profit = revenue - taken.cost
+  const carriedPart = taken.originalCost - taken.cost
+  const details = [
+    { label: 'จำนวน', value: `${num(sellQty)} ${recipe.yieldUnit} × ${money(unitPrice)}` },
+    { label: 'ยอดขาย', value: money(revenue) },
+    { label: 'ต้นทุนของที่ขายไป', value: money(taken.cost, 2) },
+    { label: 'กำไร', value: `${money(profit, 2)} (${num((profit / revenue) * 100, 1)}% ของยอดขาย)` },
+    { label: 'คงเหลือพร้อมขาย', value: `${num(available - sellQty)} ${recipe.yieldUnit}` },
+  ]
+  if (carriedPart > 1e-6) {
+    details.splice(3, 0, {
+      label: 'มีของยกมาจากวันก่อน',
+      value: `ไม่คิดต้นทุนซ้ำ (ทุนเดิม ${money(carriedPart, 2)} ถูกคิดไปแล้ววันที่ผลิต)`,
+    })
+  }
+
+  messages.push(botMsg(`ขายแล้ว · ${recipe.name}`, { tone: 'ok', undoable: true, details }))
+
+  if (shortfall > 0) {
+    messages.push(
+      botMsg(`มีของไม่พอ ขาดอีก ${num(shortfall)} ${recipe.yieldUnit}`, {
+        tone: 'warn',
+        actions: [
+          {
+            kind: 'produceThenSell',
+            label: `บันทึกผลิต ${num(shortfall)} แล้วขายเพิ่ม`,
+            recipeId: recipe.id,
+            produceQty: shortfall,
+            sellQty: shortfall,
+            unitPrice,
+          },
+        ],
+      }),
+    )
+  }
+
+  return {
+    core: { ...core, lots: taken.lots, sales: [sale, ...core.sales] },
+    messages,
+    changed: true,
+  }
+}
+
+/* --------------------------------------------------------------------------
+   ของเหลือยกไปขายวันถัดไป
+-------------------------------------------------------------------------- */
+
+function applyCarryover(
+  core: CoreState,
+  cmd: Extract<ParsedCommand, { kind: 'carryover' }>,
+  date: string,
+): RunResult {
+  const recipe = findByName(core.recipes, cmd.name)
+  const recipeId = recipe?.id ?? uid('r-ghost')
+  const recipeName = recipe?.name ?? cmd.name
+  const unit = recipe?.yieldUnit ?? cmd.unit
+
+  // ของที่ผลิตวันนี้ -> ยกไปขายพรุ่งนี้ · ของค้างจากวันก่อน -> พร้อมขายวันนี้เลย
+  let left = cmd.qty
+  let converted = 0
+  const lots = [...core.lots]
+  const newLots: Lot[] = []
+
+  if (recipe) {
+    const queue = core.lots
+      .filter((l) => l.recipeId === recipe.id && l.remaining > 1e-9 && !l.carriedOver)
+      .sort((a, b) => a.date.localeCompare(b.date))
+
+    for (const lot of queue) {
+      if (left <= 1e-9) break
+      const take = Math.min(lot.remaining, left)
+      left -= take
+      converted += take
+      const sellDate = lot.date >= date ? addDays(date, 1) : date
+      const idx = lots.findIndex((l) => l.id === lot.id)
+      // ตัดจำนวนที่ยกไปออกจากล็อตเดิม แล้วสร้างล็อต "ของยกมา" ที่ทุนเป็น 0
+      lots[idx] = { ...lot, remaining: lot.remaining - take }
+      newLots.push({
+        id: uid('l'),
+        recipeId: recipe.id,
+        recipeName: recipe.name,
+        unit,
+        date: lot.date,
+        sellDate,
+        qty: take,
+        remaining: take,
+        costPerUnit: 0,
+        originalCostPerUnit: lot.costPerUnit,
+        carriedOver: true,
+        createdAt: new Date().toISOString(),
+      })
+    }
+  }
+
+  // ส่วนที่ไม่มีล็อตรองรับ (เช่น ไม่ได้บันทึกการผลิตไว้) สร้างเป็นของยกมาทุน 0
+  if (left > 1e-9) {
+    newLots.push({
+      id: uid('l'),
+      recipeId,
+      recipeName,
+      unit,
+      date,
+      sellDate: addDays(date, 1),
+      qty: left,
+      remaining: left,
+      costPerUnit: 0,
+      carriedOver: true,
+      createdAt: new Date().toISOString(),
+    })
+  }
+
+  const sellDates = [...new Set(newLots.map((l) => l.sellDate))].sort()
+  const messages: ChatMessage[] = [
+    botMsg(`เก็บไว้ขายต่อ · ${recipeName} ${num(cmd.qty)} ${unit}`, {
+      tone: 'ok',
+      undoable: true,
+      details: [
+        { label: 'พร้อมขาย', value: sellDates.map((d) => dayLabel(d)).join(' และ ') },
+        { label: 'ต้นทุน', value: 'ไม่คิดซ้ำ — คิดไปแล้วตอนผลิต' },
+        {
+          label: 'กำไรเมื่อขายได้',
+          value: 'เท่ากับราคาขายเต็มจำนวน',
+        },
+      ],
+    }),
+  ]
+  if (!recipe) {
+    messages.push(
+      botMsg(`ยังไม่มีเมนู "${cmd.name}" ในระบบ แต่บันทึกของเหลือให้แล้ว — สร้างสูตรไว้จะช่วยให้ดูรายงานได้ครบขึ้น`, {
+        tone: 'info',
+        actions: [{ kind: 'openRecipe', label: `สร้างเมนู "${cmd.name}"`, name: cmd.name }],
+      }),
+    )
+  } else if (converted < cmd.qty - 1e-9) {
+    messages.push(
+      botMsg(`ในระบบมีของค้างอยู่ ${num(converted)} ${unit} ที่เหลือถือเป็นของยกมาที่ยังไม่ได้บันทึกการผลิต`, {
+        tone: 'info',
+      }),
+    )
+  }
+
+  return { core: { ...core, lots: [...newLots, ...lots] }, messages, changed: true }
+}
+
+/* --------------------------------------------------------------------------
+   ของเสีย / ทิ้ง
+-------------------------------------------------------------------------- */
+
+function applyWaste(core: CoreState, cmd: Extract<ParsedCommand, { kind: 'waste' }>, date: string): RunResult {
+  const recipe = findByName(core.recipes, cmd.name)
+  if (!recipe) return { core, changed: false, messages: [missingRecipeMsg(cmd.name)] }
+
+  const taken = consumeLots(core.lots, recipe.id, cmd.qty, date)
+  if (taken.taken <= 0) {
+    return {
+      core,
+      changed: false,
+      messages: [botMsg(`ไม่มี "${recipe.name}" ค้างอยู่ในระบบให้ตัดทิ้ง`, { tone: 'warn' })],
+    }
+  }
+
+  const waste = {
+    id: uid('w'),
+    date,
+    recipeId: recipe.id,
+    recipeName: recipe.name,
+    qty: taken.taken,
+    unit: recipe.yieldUnit,
+    cost: taken.originalCost,
+    reason: cmd.reason,
+    createdAt: new Date().toISOString(),
+  }
+
+  return {
+    core: { ...core, lots: taken.lots, wastes: [waste, ...core.wastes] },
+    changed: true,
+    messages: [
+      botMsg(`บันทึกของเสีย · ${recipe.name} ${num(taken.taken)} ${recipe.yieldUnit}`, {
+        tone: 'warn',
+        undoable: true,
+        details: [
+          { label: 'มูลค่าต้นทุนที่เสียไป', value: money(taken.originalCost, 2) },
+          ...(cmd.reason ? [{ label: 'สาเหตุ', value: cmd.reason }] : []),
+        ],
+      }),
+    ],
+  }
+}
+
+/* --------------------------------------------------------------------------
+   ปรับสต็อกจากการนับจริง
+-------------------------------------------------------------------------- */
+
+function applyAdjust(core: CoreState, cmd: Extract<ParsedCommand, { kind: 'adjust' }>): RunResult {
+  const item = findByName(core.items, cmd.name)
+  if (!item) {
+    return { core, changed: false, messages: [botMsg(`ไม่เจอ "${cmd.name}" ในสต็อก`, { tone: 'warn' })] }
+  }
+  if (item.base !== cmd.base) {
+    return {
+      core,
+      changed: false,
+      messages: [botMsg(`"${item.name}" เก็บเป็น${BASE_NAME[item.base]} — พิมพ์หน่วยให้ตรงกันด้วย`, { tone: 'error' })],
+    }
+  }
+  const diff = cmd.qty - item.stock
+  const items = core.items.map((i) => (i.id === item.id ? { ...i, stock: cmd.qty } : i))
+  return {
+    core: { ...core, items },
+    changed: true,
+    messages: [
+      botMsg(`ปรับสต็อกแล้ว · ${item.name}`, {
+        tone: 'ok',
+        undoable: true,
+        details: [
+          { label: 'จากเดิม', value: qtyText(item.stock, item.base, item.unitLabel) },
+          { label: 'เป็น', value: qtyText(cmd.qty, item.base, item.unitLabel) },
+          { label: 'ส่วนต่าง', value: `${diff >= 0 ? '+' : ''}${qtyText(diff, item.base, item.unitLabel)}` },
+        ],
+      }),
+    ],
+  }
+}
+
+/* --------------------------------------------------------------------------
+   คำถาม (ไม่แก้ข้อมูล)
+-------------------------------------------------------------------------- */
+
+function answerStock(core: CoreState, cmd: Extract<ParsedCommand, { kind: 'stock' }>): ChatMessage[] {
+  if (cmd.name) {
+    const item = findByName(core.items, cmd.name)
+    if (item) {
+      return [
+        botMsg(`สต็อก · ${item.name}`, {
+          tone: 'info',
+          details: [
+            { label: 'หมวดหมู่', value: CATEGORY_LABEL[item.category] },
+            { label: 'คงเหลือ', value: qtyTextFull(item.stock, item.base, item.unitLabel) },
+            { label: 'ต้นทุนเฉลี่ย', value: costText(item.avgCost, item.base, item.unitLabel) },
+            { label: 'มูลค่าคงเหลือ', value: money(item.stock * item.avgCost, 2) },
+          ],
+          actions: [{ kind: 'openItem', label: 'เปิดดูรายละเอียด', itemId: item.id }],
+        }),
+      ]
+    }
+    const recipe = findByName(core.recipes, cmd.name)
+    if (recipe) {
+      const ready = finishedStock(core.lots, recipe.id)
+      return [
+        botMsg(`ขนมพร้อมขาย · ${recipe.name}`, {
+          tone: 'info',
+          details: [{ label: 'พร้อมขายตอนนี้', value: `${num(ready)} ${recipe.yieldUnit}` }],
+        }),
+      ]
+    }
+    return [botMsg(`ไม่เจอ "${cmd.name}" ทั้งในวัตถุดิบและเมนู`, { tone: 'warn' })]
+  }
+
+  if (!core.items.length) {
+    return [botMsg('ยังไม่มีของในสต็อก — พิมพ์บันทึกการซื้อได้เลย เช่น "ซื้อมะม่วง 3 กิโล 112 บาท"', { tone: 'info' })]
+  }
+  const top = [...core.items].sort((a, b) => b.stock * b.avgCost - a.stock * a.avgCost).slice(0, 12)
+  return [
+    botMsg(`สต็อกวัตถุดิบ ${core.items.length} รายการ`, {
+      tone: 'info',
+      details: top.map((i) => ({
+        label: i.name,
+        value: `${qtyText(i.stock, i.base, i.unitLabel)} · ${costText(i.avgCost, i.base, i.unitLabel)}`,
+      })),
+    }),
+  ]
+}
+
+function answerCost(core: CoreState, cmd: Extract<ParsedCommand, { kind: 'cost' }>): ChatMessage[] {
+  const recipe = findByName(core.recipes, cmd.name)
+  if (!recipe) return [missingRecipeMsg(cmd.name)]
+
+  const cost = recipeCost(recipe, core.items)
+  const pct = cmd.marginPct ?? (recipe.marginPct || core.settings.defaultMarginPct)
+  const s = suggestPrice(cost.costPerUnit, pct, core.settings.priceMode, core.settings.priceRounding)
+  const unit = recipe.yieldUnit
+
+  const messages: ChatMessage[] = [
+    botMsg(`ต้นทุน · ${recipe.name}`, {
+      tone: 'info',
+      details: [
+        { label: `ค่าวัตถุดิบต่อ${unit}`, value: money(cost.materialPerUnit, 2) },
+        { label: `ค่าแรง/น้ำ/ไฟ/จิปาถะต่อ${unit}`, value: money(cost.overheadPerUnit, 2) },
+        { label: `ต้นทุนรวมต่อ${unit}`, value: money(cost.costPerUnit, 2) },
+      ],
+      actions: [{ kind: 'openRecipe', label: 'เปิดหน้าคิดราคา', recipeId: recipe.id }],
+    }),
+    botMsg(`อยากได้กำไร ${num(pct)}% ควรขาย ${money(s.price)} ต่อ${unit}`, {
+      tone: 'ok',
+      details: [
+        { label: 'ราคาขายที่แนะนำ', value: money(s.price) },
+        { label: 'กำไรต่อ' + unit, value: money(s.profit, 2) },
+        { label: 'คิดเป็น', value: `${num(s.markupPct, 1)}% ของทุน · ${num(s.marginPct, 1)}% ของราคาขาย` },
+        ...(recipe.price > 0
+          ? [{ label: 'ราคาที่ตั้งไว้ตอนนี้', value: money(recipe.price) }]
+          : []),
+      ],
+    }),
+  ]
+  if (cost.unpriced.length) {
+    messages.push(botMsg(`ยังไม่รู้ราคาของ ${cost.unpriced.join(', ')} — ต้นทุนจริงจะสูงกว่านี้`, { tone: 'warn' }))
+  }
+  return messages
+}
+
+export function helpMessages(): ChatMessage[] {
+  return [
+    botMsg('พิมพ์แบบที่พูดได้เลย ระบบจะจดและคิดต้นทุนให้เอง', {
+      tone: 'info',
+      details: [
+        { label: 'ซื้อของ', value: 'ซื้อกล่อง p39 1 ลัง ลังละ 1000 กล่อง ราคารวม 1680 บาท' },
+        { label: 'ซื้อของสด', value: 'ซื้อมะม่วง 3 กิโล ราคารวม 112 บาท' },
+        { label: 'ตั้งสูตร', value: 'สูตรเค้กมะม่วง ได้ 20 กล่อง ใช้ มะม่วง 1500 กรัม, กล่อง p39 20 กล่อง' },
+        { label: 'ทำขนม', value: 'ทำเค้กมะม่วง 20 กล่อง' },
+        { label: 'ขาย', value: 'ขายเค้กมะม่วง 15 กล่อง กล่องละ 120' },
+        { label: 'ของเหลือขายต่อ', value: 'เหลือเค้กมะม่วง 5 กล่อง' },
+        { label: 'ของเสีย', value: 'ทิ้งเค้กมะม่วง 2 กล่อง เพราะบูด' },
+        { label: 'ถามต้นทุน', value: 'ต้นทุนเค้กมะม่วง กำไร 40%' },
+        { label: 'ถามสต็อก', value: 'สต็อกมะม่วง' },
+        { label: 'นับสต็อกใหม่', value: 'ปรับสต็อกมะม่วง 800 กรัม' },
+      ],
+    }),
+    botMsg('พิมพ์หลายบรรทัดพร้อมกันได้ — บรรทัดต่อไปจะถือว่าเป็นคำสั่งเดียวกับบรรทัดแรก', { tone: 'info' }),
+  ]
+}
+
+/* --------------------------------------------------------------------------
+   ตัวสั่งงานหลัก
+-------------------------------------------------------------------------- */
+
+export function runCommand(core: CoreState, cmd: ParsedCommand, date = today()): RunResult {
+  switch (cmd.kind) {
+    case 'purchase':
+      return applyPurchase(core, cmd, date)
+    case 'recipe':
+      return applyRecipe(core, cmd)
+    case 'produce':
+      return applyProduce(core, cmd, date)
+    case 'sell':
+      return applySell(core, cmd, date)
+    case 'carryover':
+      return applyCarryover(core, cmd, date)
+    case 'waste':
+      return applyWaste(core, cmd, date)
+    case 'adjust':
+      return applyAdjust(core, cmd)
+    case 'stock':
+      return { core, changed: false, messages: answerStock(core, cmd) }
+    case 'cost':
+      return { core, changed: false, messages: answerCost(core, cmd) }
+    case 'help':
+      return { core, changed: false, messages: helpMessages() }
+    default:
+      return {
+        core,
+        changed: false,
+        messages: [
+          botMsg(cmd.reason, {
+            tone: 'error',
+            actions: [],
+          }),
+          botMsg('พิมพ์ "ช่วย" เพื่อดูตัวอย่างคำสั่งทั้งหมด', { tone: 'info' }),
+        ],
+      }
+  }
+}
