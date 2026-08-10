@@ -318,20 +318,30 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     save(state)
   }, [state])
 
-  // ธีมสว่าง/มืด
+  // ธีมสว่าง/มืด — เมื่อผู้ใช้ตั้งไว้ที่ "ตามเครื่อง" ให้ตามการตั้งค่าของหน้าเว็บที่ฝังแอปนี้อยู่ก่อน
+  // (เช่น เปิดผ่าน Artifact ที่มีสวิตช์ธีมของตัวเอง) แล้วค่อยตามธีมของระบบปฏิบัติการเป็นค่าสำรอง
   useEffect(() => {
     const root = document.documentElement
     const apply = () => {
-      const wantDark =
-        state.settings.theme === 'dark' ||
-        (state.settings.theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)
+      let wantDark: boolean
+      if (state.settings.theme === 'dark') wantDark = true
+      else if (state.settings.theme === 'light') wantDark = false
+      else {
+        const hostTheme = root.getAttribute('data-theme')
+        wantDark = hostTheme === 'dark' || (hostTheme !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches)
+      }
       root.classList.toggle('dark', wantDark)
     }
     apply()
     if (state.settings.theme !== 'system') return
     const mq = window.matchMedia('(prefers-color-scheme: dark)')
+    const observer = new MutationObserver(apply)
     mq.addEventListener('change', apply)
-    return () => mq.removeEventListener('change', apply)
+    observer.observe(root, { attributes: true, attributeFilter: ['data-theme'] })
+    return () => {
+      mq.removeEventListener('change', apply)
+      observer.disconnect()
+    }
   }, [state.settings.theme])
 
   const value = useMemo(() => ({ state, dispatch }), [state])
