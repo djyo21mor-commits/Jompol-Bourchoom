@@ -163,6 +163,52 @@ export default function SettingsPage() {
         </button>
       </div>
 
+      <Card
+        title="หมวดหมู่รายรับ-รายจ่าย"
+        subtitle="ใช้ในหน้าบัญชี — พิมพ์หมวดใหม่ในแชทได้เลย ระบบจะเพิ่มให้เอง ลบหมวดที่ไม่ใช้ได้ที่นี่"
+      >
+        {(
+          [
+            ['expenseCategories', 'หมวดรายจ่าย'],
+            ['incomeCategories', 'หมวดรายรับ'],
+          ] as const
+        ).map(([key, label]) => (
+          <div key={key} className="mb-4 last:mb-0">
+            <h3 className="mb-2 text-[13px] font-semibold text-ink-2">{label}</h3>
+            <div className="flex flex-wrap gap-2">
+              {draft[key].map((c) => (
+                <span key={c} className="inline-flex items-center gap-1 rounded-lg bg-surface-2 py-1.5 pl-3 pr-1.5 text-[13px]">
+                  {c}
+                  <button
+                    type="button"
+                    aria-label={`ลบหมวด ${c}`}
+                    onClick={() => set(key, draft[key].filter((x) => x !== c))}
+                    className="rounded p-0.5 text-ink-3 hover:bg-surface-3 hover:text-bad-ink"
+                  >
+                    <Icon name="close" className="size-3.5" />
+                  </button>
+                </span>
+              ))}
+              {!draft[key].length && <span className="text-[13px] text-ink-3">ยังไม่มีหมวด</span>}
+            </div>
+            <input
+              className="field mt-2"
+              placeholder={`เพิ่ม${label}ใหม่ แล้วกด Enter`}
+              onKeyDown={(e) => {
+                if (e.key !== 'Enter') return
+                e.preventDefault()
+                const value = e.currentTarget.value.trim()
+                if (value && !draft[key].includes(value)) set(key, [...draft[key], value])
+                e.currentTarget.value = ''
+              }}
+            />
+          </div>
+        ))}
+        <p className="mt-1 text-[12px] text-ink-3">
+          ลบหมวดแล้วรายการเก่าที่ใช้หมวดนั้นยังอยู่ครบ แค่ไม่ขึ้นเป็นตัวเลือกให้กดอีก
+        </p>
+      </Card>
+
       <LedgerExport />
 
       <Card title="สำรองข้อมูล" subtitle="ข้อมูลทั้งหมดเก็บอยู่ในเครื่องนี้เท่านั้น ควรดาวน์โหลดเก็บไว้เป็นระยะ">

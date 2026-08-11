@@ -57,6 +57,8 @@ export type ParsedCommand =
       raw: string
     }
   | { kind: 'adjust'; name: string; qty: number; base: BaseUnit; unitLabel: string; raw: string }
+  | { kind: 'expense'; category: string; detail: string; amount: number; raw: string }
+  | { kind: 'income'; category: string; detail: string; amount: number; raw: string }
   | { kind: 'stock'; name?: string; raw: string }
   | { kind: 'cost'; name: string; marginPct?: number; raw: string }
   | { kind: 'help'; raw: string }
@@ -234,7 +236,11 @@ const INTENTS: { kind: string; re: RegExp }[] = [
   { kind: 'recipe', re: /^(?:สูตร|ตั้งสูตร|เพิ่มสูตร|เมนูใหม่|สร้างเมนู)/ },
   { kind: 'cost', re: /^(?:ต้นทุน|ทุน|คิดราคา|ตั้งราคา|ราคาขาย|คำนวณราคา|ขายเท่าไหร่|ขายเท่าไร)/ },
   { kind: 'stock', re: /^(?:สต็อก|สต๊อก|สตอก|stock|เช็ค|ดูของ|ของเหลือเท่าไหร่|คงเหลือ|มีอะไรบ้าง)/i },
-  { kind: 'purchase', re: /^(?:ซื้อ|ซิ้อ|สั่งซื้อ|รับของ|เติมของ|เติม|ลงของ|จ่ายค่า)/ },
+  { kind: 'purchase', re: /^(?:ซื้อ|ซิ้อ|สั่งซื้อ|รับของ|เติมของ|เติม|ลงของ)/ },
+  // "จ่าย…" คือค่าใช้จ่ายที่ไม่เข้าสต็อก ส่วน "ซื้อ…" คือของที่เข้าสต็อก
+  // ข้อความที่ขึ้นต้นด้วย "ค่า" ตรงๆ (ค่าเช่าร้าน 5000) จับด้วย lookahead เพื่อไม่ให้ตัดคำว่า "ค่า" ทิ้ง
+  { kind: 'expense', re: /^(?:จ่ายเงิน|จ่าย)(?=ค่า)|^(?:จ่ายเงิน|จ่าย)\s*|^(?=ค่า)/ },
+  { kind: 'income', re: /^(?:รับเงินจาก|รับเงิน|ได้เงินจาก|ได้เงิน|เงินเข้า|รายรับ|รายได้)\s*/ },
   { kind: 'produce', re: /^(?:ทำ|ทํา|ผลิต|อบ|ได้ขนม|ทำขนม)/ },
   { kind: 'sell', re: /^(?:ขายได้|ขาย|จำหน่าย|ส่งลูกค้า)/ },
   { kind: 'carryover', re: /^(?:เหลือ|ของเหลือ|ค้าง|ยกมา|ยกไป|เก็บไว้ขาย|ขายต่อ)/ },
@@ -485,6 +491,51 @@ function parseAdjust(body: string, raw: string): ParsedCommand {
   return { kind: 'adjust', name, qty: q.qty, base: q.base, unitLabel: q.unitLabel, raw }
 }
 
+/**
+ * อ่านรายรับ/รายจ่ายที่ไม่เกี่ยวกับสต็อก เช่น
+ *   จ่ายค่าเช่าร้าน 5000 บาท
+ *   ค่าไฟ 1200
+ *   รับเงินค่าจ้างทำเค้ก 800 บาท
+ * ข้อความที่เหลือหลังตัดจำนวนเงินออก จะกลายเป็นชื่อหมวดหมู่
+ */
+function parseMoney(kind: 'expense' | 'income', body: string, raw: string): ParsedCommand {
+  let s = body
+  let amount: number | null = null
+
+  for (const src of [
+    `(?:จำนวน|เป็นเงิน|รวม|ทั้งหมด|ราคา)\\s*(${NUM})\\s*(?:บาท)?`,
+    `(${NUM})\\s*บาท`,
+    `(${NUM})`,
+  ]) {
+    const r = cutLast(s, src)
+    if (r.m) {
+      amount = parseFloat(r.m[1])
+      s = r.rest
+      break
+    }
+  }
+
+  const verb = kind === 'expense' ? 'จ่ายค่าเช่าร้าน 5000 บาท' : 'รับเงินค่าจ้างทำเค้ก 800 บาท'
+  if (amount === null) {
+    return { kind: 'unknown', raw, reason: `ไม่เจอจำนวนเงิน — ลองพิมพ์เช่น "${verb}"` }
+  }
+  if (amount <= 0) return { kind: 'unknown', raw, reason: 'จำนวนเงินต้องมากกว่า 0' }
+
+  // แยกหมายเหตุที่คั่นด้วยเครื่องหมายหรือคำว่า "หมายเหตุ"
+  let detail = ''
+  const noteCut = cut(s, /(?:\s[-–—]\s|หมายเหตุ|สำหรับ|เพราะ)\s*(.+)$/)
+  if (noteCut.m) {
+    detail = noteCut.m[1].trim()
+    s = noteCut.rest
+  }
+
+  const category = cleanName(s.replace(/^(?:ค่าใช้จ่าย|รายจ่าย|รายรับ|รายได้)\s*/, ''))
+  if (!category) {
+    return { kind: 'unknown', raw, reason: `ไม่เจอว่าเป็นค่าอะไร — ลองพิมพ์เช่น "${verb}"` }
+  }
+  return { kind, category, detail, amount, raw }
+}
+
 function parseCost(body: string, raw: string): ParsedCommand {
   let s = body
   let marginPct: number | undefined
@@ -533,6 +584,9 @@ export function parseLine(input: string): ParsedCommand {
       return parseRecipe(intent.rest, raw)
     case 'adjust':
       return parseAdjust(intent.rest, raw)
+    case 'expense':
+    case 'income':
+      return parseMoney(intent.kind, intent.rest, raw)
     case 'cost':
       return parseCost(intent.rest, raw)
     case 'stock': {

@@ -158,6 +158,27 @@ export interface Waste {
   createdAt: string
 }
 
+/** ทิศทางของเงิน */
+export type TxKind = 'income' | 'expense'
+
+export const TX_KIND_LABEL: Record<TxKind, string> = { income: 'รายรับ', expense: 'รายจ่าย' }
+
+/**
+ * รายรับ-รายจ่ายที่บันทึกเอง — ทุกอย่างที่ไม่ได้มาจากการขายขนมหรือการซื้อของเข้าสต็อก
+ * เช่น ค่าเช่าร้าน บิลค่าไฟจริง ค่าจ้างพนักงาน เงินที่ได้จากงานรับจ้าง
+ */
+export interface Transaction {
+  id: string
+  date: string
+  kind: TxKind
+  /** หมวดหมู่ เช่น ค่าเช่าร้าน ค่าไฟ — เพิ่มหมวดใหม่ได้อิสระ */
+  category: string
+  /** รายละเอียดเพิ่มเติม ไม่ใส่ก็ได้ */
+  detail: string
+  amount: number
+  createdAt: string
+}
+
 export type ChatRole = 'user' | 'bot'
 
 export type ChatTone = 'ok' | 'info' | 'warn' | 'error'
@@ -193,6 +214,10 @@ export interface Settings {
   priceMode: 'markup' | 'margin'
   /** ปัดราคาขายขึ้นเป็นจำนวนเต็มกี่บาท (0 = ไม่ปัด) */
   priceRounding: number
+  /** หมวดหมู่รายจ่ายที่ใช้บ่อย — เพิ่มเองได้ และระบบจะจำหมวดใหม่ที่พิมพ์ในแชทให้ */
+  expenseCategories: string[]
+  /** หมวดหมู่รายรับอื่นที่ไม่ใช่การขายขนม */
+  incomeCategories: string[]
   theme: 'light' | 'dark' | 'system'
 }
 
@@ -205,6 +230,8 @@ export interface CoreState {
   lots: Lot[]
   sales: Sale[]
   wastes: Waste[]
+  /** รายรับ-รายจ่ายที่บันทึกเอง นอกเหนือจากการขายและการซื้อของ */
+  transactions: Transaction[]
   settings: Settings
 }
 

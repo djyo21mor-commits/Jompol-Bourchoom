@@ -17,6 +17,7 @@ function emptyCore(): CoreState {
     lots: [],
     sales: [],
     wastes: [],
+    transactions: [],
     settings: { ...DEFAULT_SETTINGS },
   }
 }

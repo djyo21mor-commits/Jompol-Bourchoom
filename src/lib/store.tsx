@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useReducer, type ReactNode } from 'react'
-import type { AppState, ChatMessage, CoreState, Item, Recipe, Settings } from '../types'
+import type { AppState, ChatMessage, CoreState, Item, Recipe, Settings, Transaction } from '../types'
 import { parseScript } from './parser'
 import { helpMessages, produce, runCommand, uid } from './engine'
 import { today } from './format'
@@ -13,6 +13,11 @@ export const DEFAULT_SETTINGS: Settings = {
   defaultMarginPct: 30,
   priceMode: 'markup',
   priceRounding: 0,
+  expenseCategories: [
+    'ค่าเช่าร้าน', 'ค่าน้ำ', 'ค่าไฟ', 'ค่าแก๊ส', 'ค่าจ้างพนักงาน',
+    'ค่าเดินทาง', 'ค่าโทรศัพท์/เน็ต', 'ค่าอุปกรณ์', 'ค่าการตลาด', 'ค่าธรรมเนียม',
+  ],
+  incomeCategories: ['รับจ้างทำขนม', 'ขายของอื่น', 'เงินทุนเพิ่ม', 'รายได้อื่น'],
   theme: 'system',
 }
 
@@ -25,6 +30,7 @@ function emptyCore(): CoreState {
     lots: [],
     sales: [],
     wastes: [],
+    transactions: [],
     settings: { ...DEFAULT_SETTINGS },
   }
 }
@@ -51,8 +57,8 @@ function initialState(): AppState {
 -------------------------------------------------------------------------- */
 
 function coreOf(state: AppState): CoreState {
-  const { items, purchases, recipes, productions, lots, sales, wastes, settings } = state
-  return { items, purchases, recipes, productions, lots, sales, wastes, settings }
+  const { items, purchases, recipes, productions, lots, sales, wastes, transactions, settings } = state
+  return { items, purchases, recipes, productions, lots, sales, wastes, transactions, settings }
 }
 
 function load(): AppState {
@@ -106,6 +112,8 @@ export type Action =
   | { type: 'lot/carryover'; recipeId: string; qty: number; date: string }
   | { type: 'lot/waste'; recipeId: string; qty: number; date: string; reason?: string }
   | { type: 'purchase/delete'; id: string }
+  | { type: 'tx/save'; tx: Transaction }
+  | { type: 'tx/delete'; id: string }
   | { type: 'settings/save'; settings: Settings }
   | { type: 'data/replace'; state: AppState }
   | { type: 'data/reset' }
@@ -285,6 +293,23 @@ function reducer(state: AppState, action: Action): AppState {
       })
       return { ...state, items, purchases: state.purchases.filter((p) => p.id !== action.id) }
     }
+
+    case 'tx/save': {
+      const exists = state.transactions.some((t) => t.id === action.tx.id)
+      const transactions = exists
+        ? state.transactions.map((t) => (t.id === action.tx.id ? action.tx : t))
+        : [action.tx, ...state.transactions]
+      // จำหมวดใหม่ไว้ให้เลือกครั้งหน้า
+      const key = action.tx.kind === 'expense' ? 'expenseCategories' : 'incomeCategories'
+      const known = state.settings[key]
+      const settings = known.includes(action.tx.category)
+        ? state.settings
+        : { ...state.settings, [key]: [...known, action.tx.category] }
+      return { ...state, transactions, settings }
+    }
+
+    case 'tx/delete':
+      return { ...state, transactions: state.transactions.filter((t) => t.id !== action.id) }
 
     case 'settings/save':
       return { ...state, settings: action.settings }

@@ -73,7 +73,7 @@ export default function DashboardPage() {
           <div className="grid grid-cols-2 gap-3">
             <Stat label="ยอดขาย" value={baht(s.revenue, 0)} sub="บาท" tone="brand" />
             <Stat
-              label="กำไรสุทธิ"
+              label="กำไรจากขนม"
               value={baht(s.netProfit, 0)}
               sub="ยอดขาย − ต้นทุนที่ผลิต"
               tone={s.netProfit >= 0 ? 'good' : 'bad'}
@@ -97,11 +97,25 @@ export default function DashboardPage() {
               <PLRow label="ค่าวัตถุดิบและบรรจุภัณฑ์ที่ใช้ผลิต" value={money(s.materialCost, 2)} sign="−" />
               <PLRow label="ค่าแรง ค่าน้ำ ค่าไฟ จิปาถะ" value={money(s.overheadCost, 2)} sign="−" />
               <div className="flex items-baseline justify-between gap-3 border-t border-line pt-2.5">
-                <dt className="text-[15px] font-semibold text-ink">กำไรสุทธิ</dt>
-                <dd className={`text-[19px] font-bold tnum ${s.netProfit >= 0 ? 'text-good-ink' : 'text-bad-ink'}`}>
+                <dt className="font-medium text-ink">กำไรจากการทำขนม</dt>
+                <dd className={`text-[16px] font-bold tnum ${s.netProfit >= 0 ? 'text-good-ink' : 'text-bad-ink'}`}>
                   {money(s.netProfit)}
                 </dd>
               </div>
+              {(s.otherIncome > 0 || s.otherExpense > 0) && (
+                <>
+                  {s.otherIncome > 0 && <PLRow label="รายรับอื่นที่บันทึกเอง" value={money(s.otherIncome)} sign="+" />}
+                  {s.otherExpense > 0 && (
+                    <PLRow label="ค่าเช่า ค่าจ้าง บิลค่าน้ำค่าไฟ และอื่นๆ" value={money(s.otherExpense)} sign="−" />
+                  )}
+                  <div className="flex items-baseline justify-between gap-3 border-t border-line pt-2.5">
+                    <dt className="text-[15px] font-semibold text-ink">เหลือจริงหลังหักทุกอย่าง</dt>
+                    <dd className={`text-[19px] font-bold tnum ${s.finalNet >= 0 ? 'text-good-ink' : 'text-bad-ink'}`}>
+                      {money(s.finalNet)}
+                    </dd>
+                  </div>
+                </>
+              )}
             </dl>
 
             <div className="mt-3 space-y-2 rounded-xl bg-surface-2 p-3 text-[13px]">

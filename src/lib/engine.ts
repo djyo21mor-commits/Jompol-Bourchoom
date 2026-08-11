@@ -5,6 +5,7 @@ import type {
   Item,
   Lot,
   Recipe,
+  Transaction,
 } from '../types'
 import { CATEGORY_LABEL } from '../types'
 import type { ParsedCommand } from './parser'
@@ -737,6 +738,61 @@ function applyAdjust(core: CoreState, cmd: Extract<ParsedCommand, { kind: 'adjus
 }
 
 /* --------------------------------------------------------------------------
+   รายรับ-รายจ่ายที่ไม่เกี่ยวกับสต็อก
+-------------------------------------------------------------------------- */
+
+function applyMoney(
+  core: CoreState,
+  cmd: Extract<ParsedCommand, { kind: 'expense' | 'income' }>,
+  date: string,
+): RunResult {
+  const isExpense = cmd.kind === 'expense'
+  const known = isExpense ? core.settings.expenseCategories : core.settings.incomeCategories
+
+  // ถ้าพิมพ์ชื่อที่ใกล้เคียงหมวดเดิม ให้ยึดชื่อเดิมไว้ จะได้ไม่มีหมวดซ้ำซ้อนสะสม
+  const matched = known.find((c) => norm(c) === norm(cmd.category))
+  const category = matched ?? cmd.category
+
+  const tx: Transaction = {
+    id: uid('t'),
+    date,
+    kind: cmd.kind,
+    category,
+    detail: cmd.detail,
+    amount: cmd.amount,
+    createdAt: new Date().toISOString(),
+  }
+
+  // หมวดใหม่ที่ยังไม่เคยใช้ ให้จำไว้เป็นตัวเลือกครั้งหน้า
+  const settings = matched
+    ? core.settings
+    : {
+        ...core.settings,
+        [isExpense ? 'expenseCategories' : 'incomeCategories']: [...known, category],
+      }
+
+  const details = [
+    { label: 'หมวดหมู่', value: category },
+    { label: 'จำนวนเงิน', value: money(cmd.amount, 2) },
+    { label: 'วันที่', value: dayLabel(date) },
+  ]
+  if (cmd.detail) details.push({ label: 'หมายเหตุ', value: cmd.detail })
+  if (!matched) details.push({ label: 'หมวดใหม่', value: 'จำไว้ให้แล้ว ครั้งหน้าเลือกจากรายการได้เลย' })
+
+  return {
+    core: { ...core, transactions: [tx, ...core.transactions], settings },
+    changed: true,
+    messages: [
+      botMsg(`บันทึก${isExpense ? 'รายจ่าย' : 'รายรับ'}แล้ว · ${category}`, {
+        tone: 'ok',
+        undoable: true,
+        details,
+      }),
+    ],
+  }
+}
+
+/* --------------------------------------------------------------------------
    คำถาม (ไม่แก้ข้อมูล)
 -------------------------------------------------------------------------- */
 
@@ -834,6 +890,9 @@ export function helpMessages(): ChatMessage[] {
         { label: 'ขาย', value: 'ขายเค้กมะม่วง 15 กล่อง กล่องละ 120' },
         { label: 'ของเหลือขายต่อ', value: 'เหลือเค้กมะม่วง 5 กล่อง' },
         { label: 'ของเสีย', value: 'ทิ้งเค้กมะม่วง 2 กล่อง เพราะบูด' },
+        { label: 'ค่าใช้จ่ายอื่น', value: 'จ่ายค่าเช่าร้าน 5000 บาท' },
+        { label: 'บิลค่าน้ำค่าไฟ', value: 'ค่าไฟ 1200 บาท' },
+        { label: 'รายรับอื่น', value: 'รับเงินค่าจ้างทำเค้ก 800 บาท' },
         { label: 'ถามต้นทุน', value: 'ต้นทุนเค้กมะม่วง กำไร 40%' },
         { label: 'ถามสต็อก', value: 'สต็อกมะม่วง' },
         { label: 'นับสต็อกใหม่', value: 'ปรับสต็อกมะม่วง 800 กรัม' },
@@ -863,6 +922,9 @@ export function runCommand(core: CoreState, cmd: ParsedCommand, date = today()):
       return applyWaste(core, cmd, date)
     case 'adjust':
       return applyAdjust(core, cmd)
+    case 'expense':
+    case 'income':
+      return applyMoney(core, cmd, date)
     case 'stock':
       return { core, changed: false, messages: answerStock(core, cmd) }
     case 'cost':

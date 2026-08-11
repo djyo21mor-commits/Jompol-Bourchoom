@@ -311,6 +311,49 @@ export function MenuRanking({ data, unit = 'กล่อง' }: { data: MenuStat
 }
 
 /* --------------------------------------------------------------------------
+   อันดับทั่วไป — ใช้กับหมวดหมู่รายรับ-รายจ่าย
+   ใช้แท่งความยาวสื่อขนาดแทนการไล่สี เพราะหมวดหมู่มีได้ไม่จำกัด
+   ถ้าไล่สีจะเกินจำนวนสีที่แยกออกจากกันได้จริง
+-------------------------------------------------------------------------- */
+
+export function RankBars({
+  rows,
+  tone = 'neutral',
+  emptyText = 'ยังไม่มีข้อมูล',
+}: {
+  rows: { label: string; amount: number; sub?: string }[]
+  tone?: 'good' | 'bad' | 'neutral'
+  emptyText?: string
+}) {
+  if (!rows.length) return <p className="py-6 text-center text-[13.5px] text-ink-3">{emptyText}</p>
+  const max = Math.max(...rows.map((r) => r.amount), 1)
+  const total = rows.reduce((s, r) => s + r.amount, 0)
+  const barColor = tone === 'good' ? 'bg-good' : tone === 'bad' ? 'bg-bad' : 'bg-s1'
+
+  return (
+    <ul className="space-y-2.5">
+      {rows.map((r) => (
+        <li key={r.label}>
+          <div className="flex items-baseline justify-between gap-3 text-[13.5px]">
+            <span className="truncate font-medium text-ink">{r.label}</span>
+            <span className="shrink-0 tnum font-semibold text-ink">{baht(r.amount, 0)} บาท</span>
+          </div>
+          <div className="mt-1 flex items-center gap-2">
+            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface-2">
+              <div className={`h-full rounded-full ${barColor}`} style={{ width: `${Math.max((r.amount / max) * 100, 2)}%` }} />
+            </div>
+            <span className="w-16 shrink-0 text-right text-[12px] text-ink-3 tnum">
+              {total > 0 ? `${num((r.amount / total) * 100, 0)}%` : '—'}
+            </span>
+          </div>
+          {r.sub && <p className="mt-0.5 text-[12px] text-ink-3">{r.sub}</p>}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+/* --------------------------------------------------------------------------
    แถบสัดส่วนต้นทุน: วัตถุดิบ / ค่าแรง / ค่าน้ำ / ค่าไฟ / จิปาถะ
 -------------------------------------------------------------------------- */
 

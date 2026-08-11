@@ -5,16 +5,18 @@ import ChatPage from './pages/ChatPage'
 import StockPage from './pages/StockPage'
 import RecipePage from './pages/RecipePage'
 import SalesPage from './pages/SalesPage'
+import MoneyPage from './pages/MoneyPage'
 import DashboardPage from './pages/DashboardPage'
 import SettingsPage from './pages/SettingsPage'
 
-type TabKey = 'chat' | 'stock' | 'recipes' | 'sales' | 'dashboard' | 'settings'
+type TabKey = 'chat' | 'stock' | 'recipes' | 'sales' | 'money' | 'dashboard' | 'settings'
 
 const TABS: { key: TabKey; label: string; icon: string }[] = [
   { key: 'chat', label: 'แชท', icon: 'chat' },
   { key: 'stock', label: 'สต็อก', icon: 'box' },
   { key: 'recipes', label: 'เมนู', icon: 'book' },
   { key: 'sales', label: 'ขาย', icon: 'cart' },
+  { key: 'money', label: 'บัญชี', icon: 'wallet' },
   { key: 'dashboard', label: 'สรุป', icon: 'chart' },
 ]
 
@@ -67,6 +69,7 @@ function Shell() {
           <RecipePage key={focus.nonce} focus={focus.recipeId || focus.name ? focus : undefined} />
         )}
         {tab === 'sales' && <SalesPage />}
+        {tab === 'money' && <MoneyPage />}
         {tab === 'dashboard' && <DashboardPage />}
         {tab === 'settings' && <SettingsPage />}
       </main>

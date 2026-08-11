@@ -224,10 +224,16 @@ export interface Summary {
   /** มูลค่าต้นทุนของที่ทิ้งไป (รวมอยู่ในต้นทุนผลิตแล้ว จึงไม่หักซ้ำ) */
   wasteCost: number
   /**
-   * กำไรสุทธิแบบวันต่อวัน = ยอดขาย - ต้นทุนที่ลงมือผลิตในช่วงนี้
+   * กำไรจากการทำขนมอย่างเดียว = ยอดขาย - ต้นทุนที่ลงมือผลิตในช่วงนี้
    * ของเหลือและของเสียสะท้อนอยู่ในนี้อยู่แล้ว เพราะจ่ายค่าผลิตไปแต่ไม่มีรายได้กลับมา
    */
   netProfit: number
+  /** รายรับอื่นที่บันทึกเอง เช่น งานรับจ้าง */
+  otherIncome: number
+  /** ค่าใช้จ่ายอื่นที่บันทึกเอง เช่น ค่าเช่า ค่าจ้าง บิลค่าไฟ */
+  otherExpense: number
+  /** เหลือจริงหลังหักทุกอย่าง = กำไรจากขนม + รายรับอื่น - ค่าใช้จ่ายอื่น */
+  finalNet: number
   qtySold: number
   qtyProduced: number
   qtyWasted: number
@@ -249,6 +255,7 @@ export function summarize(state: AppState, from: string, to: string): Summary {
   const productions = state.productions.filter((p) => inRange(p.date, from, to))
   const purchases = state.purchases.filter((p) => inRange(p.date, from, to))
   const wastes = state.wastes.filter((w) => inRange(w.date, from, to))
+  const transactions = state.transactions.filter((t) => inRange(t.date, from, to))
 
   const revenue = sales.reduce((s, x) => s + x.revenue, 0)
   const cogs = sales.reduce((s, x) => s + x.cost, 0)
@@ -260,6 +267,9 @@ export function summarize(state: AppState, from: string, to: string): Summary {
   const purchaseSpend = purchases.reduce((s, x) => s + x.total, 0)
   const wasteCost = wastes.reduce((s, x) => s + x.cost, 0)
   const qtyWasted = wastes.reduce((s, x) => s + x.qty, 0)
+
+  const otherIncome = transactions.filter((t) => t.kind === 'income').reduce((s, t) => s + t.amount, 0)
+  const otherExpense = transactions.filter((t) => t.kind === 'expense').reduce((s, t) => s + t.amount, 0)
 
   const leftovers = state.lots.filter((l) => l.remaining > 1e-9 && inRange(l.date, from, to))
   const leftoverQty = leftovers.reduce((s, l) => s + l.remaining, 0)
@@ -303,6 +313,9 @@ export function summarize(state: AppState, from: string, to: string): Summary {
     purchaseSpend,
     wasteCost,
     netProfit: revenue - productionCost,
+    otherIncome,
+    otherExpense,
+    finalNet: revenue - productionCost + otherIncome - otherExpense,
     qtySold,
     qtyProduced,
     qtyWasted,

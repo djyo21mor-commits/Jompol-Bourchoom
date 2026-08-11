@@ -58,6 +58,19 @@ export function buildLedger(state: AppState, opts: LedgerOptions): LedgerRow[] {
 
   const rows: LedgerRow[] = []
 
+  // รายรับ-รายจ่ายที่บันทึกเอง (ค่าเช่า บิลค่าไฟ ค่าจ้าง ฯลฯ) ออกทีละรายการเสมอ
+  // เพราะแต่ละรายการมีความหมายของตัวเอง รวมยอดแล้วจะอ่านไม่ออกว่าจ่ายอะไรไป
+  for (const t of state.transactions.filter((t) => within(t.date))) {
+    rows.push({
+      date: t.date,
+      kind: t.kind,
+      category: t.category,
+      detail: t.detail || t.category,
+      amount: t.amount,
+      note: t.detail ? '' : 'บันทึกเอง',
+    })
+  }
+
   if (mode === 'detail') {
     for (const s of sales) {
       rows.push({
