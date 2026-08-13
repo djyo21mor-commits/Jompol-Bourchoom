@@ -202,6 +202,9 @@ export default function MoneyPage() {
                         }
                       : undefined
                   }
+                  onDelete={() =>
+                    dispatch({ type: 'money/deleteEntry', source: entry.source, refId: entry.refId })
+                  }
                 />
               ))}
             </ul>
@@ -254,7 +257,15 @@ function Line({
   )
 }
 
-function EntryRow({ entry, onEdit }: { entry: MoneyEntry; onEdit?: () => void }) {
+function EntryRow({
+  entry,
+  onEdit,
+  onDelete,
+}: {
+  entry: MoneyEntry
+  onEdit?: () => void
+  onDelete: () => void
+}) {
   const positive = entry.kind === 'income'
   const body = (
     <>
@@ -278,14 +289,23 @@ function EntryRow({ entry, onEdit }: { entry: MoneyEntry; onEdit?: () => void })
   )
 
   return (
-    <li>
+    <li className="flex items-center gap-1 pr-2 hover:bg-surface-2">
       {onEdit ? (
-        <button type="button" onClick={onEdit} className="flex w-full items-center gap-3 px-4 py-2.5 text-left hover:bg-surface-2">
+        <button type="button" onClick={onEdit} className="flex min-w-0 flex-1 items-center gap-3 px-4 py-2.5 text-left">
           {body}
         </button>
       ) : (
-        <div className="flex items-center gap-3 px-4 py-2.5">{body}</div>
+        <div className="flex min-w-0 flex-1 items-center gap-3 px-4 py-2.5">{body}</div>
       )}
+      {/* ลบได้ทุกรายการ ไม่ว่าจะมาจากแชท จากยอดวัน หรือบันทึกเอง */}
+      <ConfirmButton
+        onConfirm={onDelete}
+        label=""
+        confirmLabel="ยืนยันลบ"
+        className="btn-ghost btn-sm shrink-0 !px-2 text-ink-3 hover:text-bad-ink"
+        icon="trash"
+        ariaLabel={`ลบรายการ ${entry.category} ${baht(entry.amount, 0)} บาท`}
+      />
     </li>
   )
 }

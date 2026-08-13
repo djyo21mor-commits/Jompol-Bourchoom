@@ -310,11 +310,16 @@ export function ConfirmButton({
   label = 'ลบ',
   confirmLabel = 'กดอีกครั้งเพื่อลบ',
   className = 'btn-ghost btn-sm text-bad-ink',
+  icon,
+  ariaLabel,
 }: {
   onConfirm: () => void
   label?: string
   confirmLabel?: string
   className?: string
+  /** ไอคอนนำหน้า ใช้เวลาปุ่มแคบจนไม่มีที่ใส่ข้อความ */
+  icon?: string
+  ariaLabel?: string
 }) {
   const armed = useRef(false)
   const timer = useRef<number | undefined>(undefined)
@@ -326,6 +331,7 @@ export function ConfirmButton({
     <button
       type="button"
       className={className}
+      aria-label={ariaLabel}
       onClick={() => {
         if (armed.current) {
           window.clearTimeout(timer.current)
@@ -341,6 +347,7 @@ export function ConfirmButton({
         }, 3000)
       }}
     >
+      {icon && <Icon name={icon} className="size-4 shrink-0" />}
       <span ref={labelRef}>{label}</span>
     </button>
   )

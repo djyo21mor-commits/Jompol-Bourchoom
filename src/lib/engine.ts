@@ -7,9 +7,13 @@ import type {
   Item,
   Lot,
   PendingRecipe,
+  Production,
+  Purchase,
   Recipe,
+  Sale,
   Transaction,
   TxKind,
+  Waste,
 } from '../types'
 import { CATEGORY_LABEL } from '../types'
 import type { ParsedCommand } from './parser'
@@ -1433,7 +1437,27 @@ export interface DeleteResult {
   removed: string[]
 }
 
-export function deleteByMessage(core: CoreState, msgId: string): DeleteResult {
+/** รายการที่จะถอนออก แยกตามชนิด */
+interface Picked {
+  sales: Sale[]
+  wastes: Waste[]
+  lots: Lot[]
+  productions: Production[]
+  purchases: Purchase[]
+  transactions: Transaction[]
+  assets: Asset[]
+}
+
+const NOTHING: Picked = {
+  sales: [], wastes: [], lots: [], productions: [], purchases: [], transactions: [], assets: [],
+}
+
+/**
+ * ถอนรายการที่เลือกออกจากระบบ พร้อมคืนค่าทุกอย่างที่รายการนั้นเคยเปลี่ยนไป
+ * ใช้ร่วมกันทั้งตอนลบข้อความในแชท และตอนลบรายการจากหน้าบัญชี
+ */
+function removeRecords(core: CoreState, pick: Partial<Picked>): DeleteResult {
+  const p: Picked = { ...NOTHING, ...pick }
   const removed: string[] = []
   let items = core.items
   let lots = core.lots
@@ -1452,80 +1476,135 @@ export function deleteByMessage(core: CoreState, msgId: string): DeleteResult {
   }
 
   // 1) การขาย — ของที่ขายไปกลับเข้าล็อตเดิม
-  const sales = core.sales.filter((s) => s.srcMsgId === msgId)
-  for (const s of sales) giveBack(s.lotIds, s.qty)
-  if (sales.length) removed.push(`ยอดขาย ${num(sales.reduce((a, s) => a + s.revenue, 0))} บาท`)
+  for (const s of p.sales) giveBack(s.lotIds, s.qty)
+  if (p.sales.length) removed.push(`ยอดขาย ${num(p.sales.reduce((a, s) => a + s.revenue, 0))} บาท`)
 
   // 2) ของเสีย — คืนกลับเข้าล็อตเช่นกัน
-  const wastes = core.wastes.filter((w) => w.srcMsgId === msgId)
-  for (const w of wastes) giveBack(w.lotIds, w.qty)
-  if (wastes.length) removed.push(`ของเสีย ${wastes.length} รายการ`)
+  for (const w of p.wastes) giveBack(w.lotIds, w.qty)
+  if (p.wastes.length) removed.push(`ของเสีย ${p.wastes.length} รายการ`)
 
-  // 3) ล็อตที่ข้อความนี้สร้าง — ของยกมาต้องคืนจำนวนกลับล็อตต้นทางก่อนทิ้ง
-  const ownLots = lots.filter((l) => l.srcMsgId === msgId)
-  for (const l of ownLots) {
-    if (l.carriedOver && l.fromLotId) giveBack([l.fromLotId], l.remaining)
+  // 3) ล็อตที่ถูกลบ — ของยกมาต้องคืนจำนวนกลับล็อตต้นทางก่อนทิ้ง
+  for (const l of p.lots) {
+    if (!l.carriedOver || !l.fromLotId) continue
+    // ใช้จำนวนล่าสุดหลังคืนของจากการขายแล้ว ไม่งั้นคืนกลับล็อตต้นทางไม่ครบ
+    const now = lots.find((x) => x.id === l.id) ?? l
+    giveBack([l.fromLotId], now.remaining)
   }
-  if (ownLots.some((l) => l.carriedOver)) removed.push('ของยกมา')
-  lots = lots.filter((l) => l.srcMsgId !== msgId)
+  if (p.lots.some((l) => l.carriedOver)) removed.push('ของยกมา')
+  const goneLots = new Set(p.lots.map((l) => l.id))
+  lots = lots.filter((l) => !goneLots.has(l.id))
 
   // 4) การผลิต — คืนวัตถุดิบที่ตัดไปกลับเข้าสต็อก
-  const productions = core.productions.filter((p) => p.srcMsgId === msgId)
-  if (productions.length) {
+  if (p.productions.length) {
     const back = new Map<string, number>()
-    for (const p of productions) {
-      for (const u of p.used) back.set(u.itemId, (back.get(u.itemId) ?? 0) + u.qty)
+    for (const pr of p.productions) {
+      for (const u of pr.used) back.set(u.itemId, (back.get(u.itemId) ?? 0) + u.qty)
     }
     items = items.map((i) => (back.has(i.id) ? { ...i, stock: i.stock + back.get(i.id)! } : i))
-    removed.push(`การผลิต ${productions.map((p) => `${p.recipeName} ${num(p.qty)} ${p.unit}`).join(', ')}`)
+    removed.push(`การผลิต ${p.productions.map((pr) => `${pr.recipeName} ${num(pr.qty)} ${pr.unit}`).join(', ')}`)
   }
 
   // 5) การซื้อของ — ถอนของออกจากสต็อกและถอนต้นทุนออกจากค่าเฉลี่ย
-  const purchases = core.purchases.filter((p) => p.srcMsgId === msgId)
-  for (const p of purchases) {
+  for (const pu of p.purchases) {
     items = items.map((i) => {
-      if (i.id !== p.itemId) return i
-      const stock = i.stock - p.qty
-      const totalValue = i.stock * i.avgCost - p.total
+      if (i.id !== pu.itemId) return i
+      const stock = i.stock - pu.qty
+      const totalValue = i.stock * i.avgCost - pu.total
       return { ...i, stock, avgCost: stock > 1e-9 ? Math.max(0, totalValue / stock) : 0 }
     })
   }
-  if (purchases.length) {
-    removed.push(`ค่าซื้อของ ${num(purchases.reduce((a, p) => a + p.total, 0))} บาท (${purchases.map((p) => p.itemName).join(', ')})`)
+  if (p.purchases.length) {
+    removed.push(
+      `ค่าซื้อของ ${num(p.purchases.reduce((a, x) => a + x.total, 0))} บาท (${p.purchases.map((x) => x.itemName).join(', ')})`,
+    )
   }
 
-  // 6) รายรับ-รายจ่ายและทรัพย์สินที่บันทึกจากข้อความนี้
-  const transactions = core.transactions.filter((t) => t.srcMsgId === msgId)
-  if (transactions.length) {
-    removed.push(transactions.map((t) => `${t.category} ${num(t.amount)} บาท`).join(', '))
+  // 6) รายรับ-รายจ่ายและทรัพย์สิน
+  if (p.transactions.length) {
+    removed.push(p.transactions.map((t) => `${t.category} ${num(t.amount)} บาท`).join(', '))
   }
-  const assets = core.assets.filter((a) => a.srcMsgId === msgId)
-  if (assets.length) removed.push(`ทรัพย์สิน ${assets.map((a) => a.name).join(', ')}`)
+  if (p.assets.length) removed.push(`ทรัพย์สิน ${p.assets.map((a) => a.name).join(', ')}`)
 
-  const changed =
-    sales.length > 0 ||
-    wastes.length > 0 ||
-    ownLots.length > 0 ||
-    productions.length > 0 ||
-    purchases.length > 0 ||
-    transactions.length > 0 ||
-    assets.length > 0
+  const goneIds = <T extends { id: string }>(list: T[]) => new Set(list.map((x) => x.id))
+  const drop = <T extends { id: string }>(all: T[], picked: T[]) => {
+    if (!picked.length) return all
+    const ids = goneIds(picked)
+    return all.filter((x) => !ids.has(x.id))
+  }
 
   return {
     core: {
       ...core,
       items,
       lots,
-      sales: core.sales.filter((s) => s.srcMsgId !== msgId),
-      wastes: core.wastes.filter((w) => w.srcMsgId !== msgId),
-      productions: core.productions.filter((p) => p.srcMsgId !== msgId),
-      purchases: core.purchases.filter((p) => p.srcMsgId !== msgId),
-      transactions: core.transactions.filter((t) => t.srcMsgId !== msgId),
-      assets: core.assets.filter((a) => a.srcMsgId !== msgId),
+      sales: drop(core.sales, p.sales),
+      wastes: drop(core.wastes, p.wastes),
+      productions: drop(core.productions, p.productions),
+      purchases: drop(core.purchases, p.purchases),
+      transactions: drop(core.transactions, p.transactions),
+      assets: drop(core.assets, p.assets),
     },
-    changed,
+    changed: Object.values(p).some((list) => list.length > 0),
     removed,
   }
+}
+
+export function deleteByMessage(core: CoreState, msgId: string): DeleteResult {
+  const by = <T extends { srcMsgId?: string }>(list: T[]) => list.filter((x) => x.srcMsgId === msgId)
+  return removeRecords(core, {
+    sales: by(core.sales),
+    wastes: by(core.wastes),
+    lots: by(core.lots),
+    productions: by(core.productions),
+    purchases: by(core.purchases),
+    transactions: by(core.transactions),
+    assets: by(core.assets),
+  })
+}
+
+/**
+ * ลบรายการเดียวจากหน้าบัญชี — ใช้กับทั้งยอดขาย ค่าซื้อของ และรายการที่บันทึกเอง
+ * ทางนี้ไม่ต้องพึ่งข้อความในแชท จึงลบรายการเก่าที่บันทึกไว้ก่อนหน้านี้ได้ด้วย
+ */
+export function deleteMoneyEntry(core: CoreState, source: 'sale' | 'purchase' | 'manual', refId: string): DeleteResult {
+  if (source === 'sale') {
+    const sale = core.sales.find((s) => s.id === refId)
+    return sale ? removeRecords(core, { sales: [sale] }) : { core, changed: false, removed: [] }
+  }
+
+  if (source === 'purchase') {
+    const purchase = core.purchases.find((p) => p.id === refId)
+    return purchase ? removeRecords(core, { purchases: [purchase] }) : { core, changed: false, removed: [] }
+  }
+
+  const tx = core.transactions.find((t) => t.id === refId)
+  if (!tx) return { core, changed: false, removed: [] }
+  // รายจ่ายค่าซื้อทรัพย์สินมีทรัพย์สินผูกอยู่ ต้องหายไปพร้อมกัน ไม่งั้นมูลค่าค้างอยู่ข้างเดียว
+  const assets = core.assets.filter((a) =>
+    tx.srcMsgId ? a.srcMsgId === tx.srcMsgId : a.name === tx.detail && a.date === tx.date && a.amount === tx.amount,
+  )
+  return removeRecords(core, { transactions: [tx], assets })
+}
+
+/**
+ * ลบยอดขายทั้งวัน — ใช้เมื่อผู้ใช้ลบข้อความสรุป "รายรับของขาย" ของวันนั้นทิ้ง
+ * ของที่ขายไปกลับเข้าล็อตให้ครบ ส่วนการผลิตยังอยู่ (ทำไปแล้วจริง)
+ */
+export function deleteSalesOfDay(core: CoreState, date: string): DeleteResult {
+  const sales = core.sales.filter((s) => s.date === date)
+  return sales.length ? removeRecords(core, { sales }) : { core, changed: false, removed: [] }
+}
+
+/** ลบทรัพย์สิน พร้อมรายจ่ายที่คู่กัน — เงินออกกับมูลค่าที่ได้มาต้องหายไปพร้อมกัน */
+export function deleteAsset(core: CoreState, id: string): DeleteResult {
+  const asset = core.assets.find((a) => a.id === id)
+  if (!asset) return { core, changed: false, removed: [] }
+  const paired = core.transactions.filter((t) =>
+    asset.srcMsgId
+      ? t.srcMsgId === asset.srcMsgId && t.category === 'ซื้อทรัพย์สิน'
+      : t.category === 'ซื้อทรัพย์สิน' && t.detail === asset.name && t.date === asset.date && t.amount === asset.amount,
+  )
+  return removeRecords(core, { assets: [asset], transactions: paired.slice(0, 1) })
 }
 
 /* --------------------------------------------------------------------------

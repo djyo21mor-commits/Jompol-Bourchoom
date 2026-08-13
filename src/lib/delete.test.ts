@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { CoreState } from '../types'
-import { commitPendingRecipe, deleteByMessage, runCommand } from './engine'
+import { commitPendingRecipe, deleteAsset, deleteByMessage, deleteMoneyEntry, runCommand } from './engine'
 import { parseLine } from './parser'
 import { DEFAULT_SETTINGS } from './store'
 
@@ -126,5 +126,65 @@ describe('ลบข้อความแล้วถอนข้อมูลท�
     expect(res.changed).toBe(false)
     expect(res.core.purchases).toHaveLength(1)
     expect(itemNamed(res.core, 'มะม่วง').stock).toBe(3000)
+  })
+})
+
+describe('ลบรายการตรงๆ จากหน้าบัญชี', () => {
+  /** ข้อมูลเก่าที่บันทึกไว้ก่อนมีระบบผูกข้อความ จึงไม่มี srcMsgId */
+  function legacy(): CoreState {
+    let core = runCommand(emptyCore(), parseLine('ซื้อมะม่วง 3 กิโล ราคารวม 300 บาท'), DAY1).core
+    core = runCommand(core, parseLine('สูตรเค้กมะม่วง ได้ 20 กล่อง ใช้ มะม่วง 1500 กรัม'), DAY1).core
+    core = commitPendingRecipe(core).core
+    core = runCommand(core, parseLine('ทำเค้กมะม่วง 20 กล่อง'), DAY2).core
+    core = runCommand(core, parseLine('ขายเค้กมะม่วง 15 กล่อง กล่องละ 120'), DAY2).core
+    core = runCommand(core, parseLine('จ่ายค่าเช่าร้าน 5000 บาท'), DAY2).core
+    return core
+  }
+
+  it('ลบยอดขายเก่าที่ไม่มีข้อความผูกอยู่ได้ และของกลับเข้าล็อต', () => {
+    const core = legacy()
+    expect(core.sales[0].srcMsgId).toBeUndefined()
+
+    const res = deleteMoneyEntry(core, 'sale', core.sales[0].id)
+    expect(res.changed).toBe(true)
+    expect(res.core.sales).toHaveLength(0)
+    expect(res.core.lots[0].remaining).toBe(20)
+  })
+
+  it('ลบค่าซื้อของจากหน้าบัญชี แล้วสต็อกถอยตามด้วย', () => {
+    const core = legacy()
+    const res = deleteMoneyEntry(core, 'purchase', core.purchases[0].id)
+    expect(res.core.purchases).toHaveLength(0)
+    // เหลือ 1500 ก. หลังผลิต ถอนที่ซื้อ 3000 ก. ออก จึงติดลบตามจริง
+    expect(itemNamed(res.core, 'มะม่วง').stock).toBe(-1500)
+  })
+
+  it('ลบรายจ่ายที่บันทึกเองจากหน้าบัญชี', () => {
+    const core = legacy()
+    const res = deleteMoneyEntry(core, 'manual', core.transactions[0].id)
+    expect(res.core.transactions).toHaveLength(0)
+  })
+
+  it('ลบทรัพย์สิน แล้วรายจ่ายที่คู่กันหายไปด้วย', () => {
+    const core = runCommand(emptyCore(), parseLine('ซื้อทองคำ จำนวน 10000 บาท ที่ราคาบาทละ 65000 บาท', 'money'), DAY2).core
+    expect(core.assets).toHaveLength(1)
+
+    const res = deleteAsset(core, core.assets[0].id)
+    expect(res.core.assets).toHaveLength(0)
+    expect(res.core.transactions).toHaveLength(0)
+  })
+
+  it('ลบรายจ่ายค่าทรัพย์สิน แล้วทรัพย์สินหายไปด้วย', () => {
+    const core = runCommand(emptyCore(), parseLine('ซื้อทองคำ จำนวน 10000 บาท ที่ราคาบาทละ 65000 บาท', 'money'), DAY2).core
+    const res = deleteMoneyEntry(core, 'manual', core.transactions[0].id)
+    expect(res.core.transactions).toHaveLength(0)
+    expect(res.core.assets).toHaveLength(0)
+  })
+
+  it('รายการที่ไม่มีอยู่จริง ลบแล้วไม่มีอะไรเปลี่ยน', () => {
+    const core = legacy()
+    const res = deleteMoneyEntry(core, 'sale', 'ไม่มีจริง')
+    expect(res.changed).toBe(false)
+    expect(res.core).toBe(core)
   })
 })

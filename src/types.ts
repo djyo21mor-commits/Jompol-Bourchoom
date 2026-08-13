@@ -262,6 +262,8 @@ export interface ChatMessage {
   actions?: ChatAction[]
   /** true เมื่อข้อความนี้ทำให้ข้อมูลเปลี่ยน และยังย้อนกลับได้ */
   undoable?: boolean
+  /** ข้อความต้นทางที่ทำให้เกิดข้อความนี้ — ใช้ให้ลบจากช่องไหนก็ถอนข้อมูลชุดเดียวกัน */
+  srcMsgId?: string
   at: string
 }
 

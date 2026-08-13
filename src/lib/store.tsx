@@ -17,7 +17,10 @@ import {
   commitPendingRecipe,
   dailyIncomeMessage,
   dailyIncomeMessageId,
+  deleteAsset,
   deleteByMessage,
+  deleteMoneyEntry,
+  deleteSalesOfDay,
   helpMessages,
   moneyHelpMessages,
   produce,
@@ -205,6 +208,7 @@ export type Action =
   | { type: 'purchase/delete'; id: string }
   | { type: 'tx/save'; tx: Transaction }
   | { type: 'tx/delete'; id: string }
+  | { type: 'money/deleteEntry'; source: 'sale' | 'purchase' | 'manual'; refId: string }
   | { type: 'settings/save'; settings: Settings }
   | { type: 'data/replace'; state: AppState }
   | { type: 'data/reset' }
@@ -263,6 +267,8 @@ function reducer(state: AppState, action: Action): AppState {
             role: 'bot',
             at: new Date().toISOString(),
             tone: 'info',
+            // ผูกกลับไปที่ข้อความต้นทาง ลบใบแจ้งนี้ก็ถอนค่าซื้อของออกได้เหมือนกัน
+            srcMsgId: asked.id,
             text: `ค่าของขาย · ${cmd.name}`,
             details: [
               { label: 'จำนวนเงิน', value: `${cmd.total.toLocaleString('th-TH')} บาท` },
@@ -307,19 +313,8 @@ function reducer(state: AppState, action: Action): AppState {
       }
     }
 
-    case 'asset/delete': {
-      const asset = state.assets.find((a) => a.id === action.id)
-      if (!asset) return state
-      // ลบทรัพย์สินแล้วต้องลบรายจ่ายที่คู่กันด้วย ไม่งั้นเงินจะหายไปข้างเดียว
-      const txIndex = state.transactions.findIndex(
-        (t) => t.category === 'ซื้อทรัพย์สิน' && t.detail === asset.name && t.date === asset.date && t.amount === asset.amount,
-      )
-      return {
-        ...state,
-        assets: state.assets.filter((a) => a.id !== action.id),
-        transactions: txIndex < 0 ? state.transactions : state.transactions.filter((_, i) => i !== txIndex),
-      }
-    }
+    case 'asset/delete':
+      return { ...state, ...deleteAsset(coreOf(state), action.id).core }
 
     case 'person/switch': {
       const people = state.settings.people.includes(action.name)
@@ -346,28 +341,51 @@ function reducer(state: AppState, action: Action): AppState {
       const target = state.chat.find((m) => m.id === action.msgId)
       if (!target) return state
 
+      // ข้อความแจ้งเตือนที่เด้งไปอีกช่อง ผูกกลับไปที่ข้อความต้นทาง — ลบที่ไหนก็ถอนข้อมูลชุดเดียวกัน
+      const anchorId = target.srcMsgId ?? target.id
+      const anchor = state.chat.find((m) => m.id === anchorId) ?? target
+
+      const gone = new Set<string>([target.id, anchorId])
       // ลบข้อความของผู้ใช้ = ลบคำตอบของบอทที่ตามมาด้วย (รวมที่เด้งไปช่องรายรับ-รายจ่าย)
-      const gone = new Set<string>([target.id])
-      if (target.role === 'user') {
-        const at = state.chat.findIndex((m) => m.id === target.id)
+      if (anchor.role === 'user') {
+        const at = state.chat.findIndex((m) => m.id === anchor.id)
         for (let i = at + 1; i < state.chat.length && state.chat[i].role === 'bot'; i++) {
           gone.add(state.chat[i].id)
         }
       }
+      for (const m of state.chat) if (m.srcMsgId === anchorId) gone.add(m.id)
 
-      const res = deleteByMessage(coreOf(state), action.msgId)
+      // ลบใบสรุป "รายรับของขาย" ของวันไหน = ถอนยอดขายของวันนั้นออกทั้งวัน
+      const dailyDate = target.id.startsWith('daily-income:') ? target.id.slice('daily-income:'.length) : null
+      const res = dailyDate
+        ? deleteSalesOfDay(coreOf(state), dailyDate)
+        : deleteByMessage(coreOf(state), anchorId)
+
       // วันที่ที่ยอดขายเปลี่ยน ต้องคิดสรุป "รายรับของขาย" ใหม่
-      const touchedDays = [...new Set(state.sales.filter((s) => s.srcMsgId === action.msgId).map((s) => s.date))]
+      const touchedDays = [
+        ...new Set(
+          state.sales.filter((s) => (dailyDate ? s.date === dailyDate : s.srcMsgId === anchorId)).map((s) => s.date),
+        ),
+      ]
 
       let chat = state.chat.filter((m) => !gone.has(m.id))
       for (const d of touchedDays) chat = withDailyIncomeNotice(chat, res.core, d)
       chat = [
         ...chat,
-        systemNote(
-          res.removed.length ? `ลบข้อความและถอนข้อมูลออกแล้ว · ${res.removed.join(' · ')}` : 'ลบข้อความแล้ว',
-          target.channel,
-          'ok',
-        ),
+        res.changed
+          ? systemNote(`ลบข้อความและถอนข้อมูลออกแล้ว · ${res.removed.join(' · ')}`, target.channel, 'ok')
+          : {
+              ...systemNote('ลบข้อความแล้ว — แต่ไม่มีข้อมูลผูกกับข้อความนี้', target.channel, 'warn'),
+              details: [
+                {
+                  label: 'ถ้ายังเห็นตัวเลขค้างอยู่',
+                  value:
+                    target.channel === 'money'
+                      ? 'ข้อความนี้อาจบันทึกไว้ก่อนอัปเดต ให้ลบรายการตรงๆ ที่หน้าบัญชี (กดถังขยะท้ายรายการ)'
+                      : 'ข้อความนี้อาจบันทึกไว้ก่อนอัปเดต ให้ลบรายการตรงๆ ที่หน้าบัญชี หน้าสต็อก หรือหน้ายอดวัน',
+                },
+              ],
+            },
       ]
 
       return {
@@ -541,7 +559,19 @@ function reducer(state: AppState, action: Action): AppState {
     }
 
     case 'tx/delete':
-      return { ...state, transactions: state.transactions.filter((t) => t.id !== action.id) }
+      return { ...state, ...deleteMoneyEntry(coreOf(state), 'manual', action.id).core }
+
+    case 'money/deleteEntry': {
+      const res = deleteMoneyEntry(coreOf(state), action.source, action.refId)
+      if (!res.changed) return state
+      // ลบยอดขายแล้ว สรุป "รายรับของขาย" ของวันนั้นต้องคิดใหม่
+      const sale = action.source === 'sale' ? state.sales.find((s) => s.id === action.refId) : undefined
+      return {
+        ...state,
+        ...res.core,
+        chat: sale ? withDailyIncomeNotice(state.chat, res.core, sale.date) : state.chat,
+      }
+    }
 
     case 'settings/save':
       return { ...state, settings: action.settings }
