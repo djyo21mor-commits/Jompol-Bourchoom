@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import type { CoreState } from '../types'
-import { cancelPendingRecipe, commitPendingRecipe, readDailySheet, recordDailySheet, runCommand } from './engine'
+import {
+  cancelPendingRecipe,
+  commitPendingRecipe,
+  dailyIncomeMessage,
+  dailyIncomeMessageId,
+  readDailySheet,
+  recordDailySheet,
+  runCommand,
+} from './engine'
 import { parseLine } from './parser'
 import { DEFAULT_SETTINGS } from './store'
 import { addDays } from './format'
@@ -247,5 +255,72 @@ describe('ผู้บันทึกสองคน', () => {
     const core = { ...emptyCore(), settings: { ...DEFAULT_SETTINGS, people: ['สามี', 'ภรรยา'], currentPerson: 'ภรรยา' } }
     const next = run(core, DAY2, 'จ่ายค่าเช่าร้าน 5000 บาท')
     expect(next.transactions[0].by).toBe('ภรรยา')
+  })
+})
+
+describe('สรุปรายรับของขายเข้าช่องเงิน', () => {
+  /** ร้านสองเมนู: ช็อกโกแลต กับ ส้ม */
+  function twoMenus(): CoreState {
+    let core = run(
+      emptyCore(),
+      DAY1,
+      'ซื้อแป้ง 10 กก. 300 บาท',
+      'สูตรเค้กช็อกโกแลต ได้ 10 กล่อง ใช้ แป้ง 500 กรัม',
+      'สูตรเค้กส้ม ได้ 20 กล่อง ใช้ แป้ง 800 กรัม',
+    )
+    return core
+  }
+
+  it('รวมยอดขายทุกเมนูของวันนั้นเป็นเงินก้อนเดียว', () => {
+    const core = twoMenus()
+    const choc = core.recipes.find((r) => r.name === 'เค้กช็อกโกแลต')!
+    const orange = core.recipes.find((r) => r.name === 'เค้กส้ม')!
+
+    let next = recordDailySheet(core, { recipeId: choc.id, date: DAY2, produced: 10, leftover: 0, unitPrice: 20 }).core
+    next = recordDailySheet(next, { recipeId: orange.id, date: DAY2, produced: 20, leftover: 0, unitPrice: 25 }).core
+
+    const msg = dailyIncomeMessage(next, DAY2)!
+    expect(msg.channel).toBe('money')
+    expect(msg.text).toContain('รายรับของขาย')
+
+    const total = msg.details!.find((d) => d.label === 'รวมรายรับของขาย')!
+    // 10×20 + 20×25 = 700
+    expect(total.value).toBe('700 บาท')
+
+    const lines = msg.details!.map((d) => `${d.label}|${d.value}`)
+    expect(lines.some((l) => l.startsWith('เค้กช็อกโกแลต|') && l.includes('200 บาท'))).toBe(true)
+    expect(lines.some((l) => l.startsWith('เค้กส้ม|') && l.includes('500 บาท'))).toBe(true)
+  })
+
+  it('นับเฉพาะที่ขายได้จริง (ทำ − เหลือ) ไม่ใช่ที่ทำทั้งหมด', () => {
+    const core = twoMenus()
+    const choc = core.recipes.find((r) => r.name === 'เค้กช็อกโกแลต')!
+    const next = recordDailySheet(core, { recipeId: choc.id, date: DAY2, produced: 10, leftover: 4, unitPrice: 20 }).core
+
+    const total = dailyIncomeMessage(next, DAY2)!.details!.find((d) => d.label === 'รวมรายรับของขาย')!
+    expect(total.value).toBe('120 บาท') // ขายได้ 6 กล่อง × 20
+  })
+
+  it('ใช้ id คงที่ต่อวัน เพื่อให้แก้ยอดแล้วทับข้อความเดิม ไม่กองซ้ำ', () => {
+    expect(dailyIncomeMessageId(DAY2)).toBe(`daily-income:${DAY2}`)
+    const core = twoMenus()
+    const choc = core.recipes.find((r) => r.name === 'เค้กช็อกโกแลต')!
+    const a = recordDailySheet(core, { recipeId: choc.id, date: DAY2, produced: 10, leftover: 0, unitPrice: 20 }).core
+    const b = recordDailySheet(a, { recipeId: choc.id, date: DAY2, produced: 10, leftover: 5, unitPrice: 20 }).core
+    expect(dailyIncomeMessage(a, DAY2)!.id).toBe(dailyIncomeMessage(b, DAY2)!.id)
+  })
+
+  it('วันที่ยังไม่ขายอะไร ไม่มีข้อความรบกวน', () => {
+    expect(dailyIncomeMessage(twoMenus(), DAY2)).toBeNull()
+  })
+
+  it('แยกตามวัน ไม่ปนกัน', () => {
+    const core = twoMenus()
+    const choc = core.recipes.find((r) => r.name === 'เค้กช็อกโกแลต')!
+    let next = recordDailySheet(core, { recipeId: choc.id, date: DAY1, produced: 5, leftover: 0, unitPrice: 20 }).core
+    next = recordDailySheet(next, { recipeId: choc.id, date: DAY2, produced: 10, leftover: 0, unitPrice: 20 }).core
+
+    expect(dailyIncomeMessage(next, DAY1)!.details!.find((d) => d.label === 'รวมรายรับของขาย')!.value).toBe('100 บาท')
+    expect(dailyIncomeMessage(next, DAY2)!.details!.find((d) => d.label === 'รวมรายรับของขาย')!.value).toBe('200 บาท')
   })
 })

@@ -4,6 +4,8 @@ import { parseScript } from './parser'
 import {
   cancelPendingRecipe,
   commitPendingRecipe,
+  dailyIncomeMessage,
+  dailyIncomeMessageId,
   helpMessages,
   moneyHelpMessages,
   produce,
@@ -147,6 +149,17 @@ export type Action =
   | { type: 'data/replace'; state: AppState }
   | { type: 'data/reset' }
 
+
+/**
+ * รีเฟรชข้อความ "รายรับของขาย" ของวันนั้นในช่องรายรับ-รายจ่าย
+ * เก็บไว้วันละข้อความเดียว แก้ยอดกี่รอบก็ทับของเดิม ไม่กองซ้ำ
+ */
+function withDailyIncomeNotice(chat: ChatMessage[], core: CoreState, date: string): ChatMessage[] {
+  const without = chat.filter((m) => m.id !== dailyIncomeMessageId(date))
+  const notice = dailyIncomeMessage(core, date)
+  return notice ? [...without, notice] : without
+}
+
 function pushSnapshot(state: AppState, core: CoreState, msgId: string): AppState['snapshots'] {
   return [...state.snapshots, { msgId, core }].slice(-MAX_SNAPSHOTS)
 }
@@ -168,6 +181,7 @@ function reducer(state: AppState, action: Action): AppState {
       let core = before
       const replies: ChatMessage[] = []
       let changed = false
+      let soldToday = false
 
       for (const cmd of parseScript(text, action.channel)) {
         const res = runCommand(core, cmd, today())
@@ -175,6 +189,8 @@ function reducer(state: AppState, action: Action): AppState {
         changed = changed || res.changed
         // ข้อความที่ไม่ได้ระบุช่องไว้เอง ให้ตอบกลับในช่องที่ผู้ใช้พิมพ์มา
         replies.push(...res.messages.map((m) => (m.channel === 'shop' ? { ...m, channel: action.channel } : m)))
+
+        if (cmd.kind === 'sell' && res.changed) soldToday = true
 
         // ซื้อของเข้าร้าน = เงินออกจริง จึงแจ้งเตือนไปที่ช่องรายรับ-รายจ่ายด้วย
         if (cmd.kind === 'purchase' && res.changed) {
@@ -197,10 +213,11 @@ function reducer(state: AppState, action: Action): AppState {
       const anchor = replies.find((m) => m.undoable)
       const snapshots = changed && anchor ? pushSnapshot(state, before, anchor.id) : state.snapshots
 
+      const chat = [...state.chat, userMessage(text, action.channel, state.settings.currentPerson), ...replies]
       return {
         ...state,
         ...core,
-        chat: [...state.chat, userMessage(text, action.channel, state.settings.currentPerson), ...replies],
+        chat: soldToday ? withDailyIncomeNotice(chat, core, today()) : chat,
         snapshots,
       }
     }
@@ -220,7 +237,11 @@ function reducer(state: AppState, action: Action): AppState {
 
     case 'daily/save': {
       const res = recordDailySheet(coreOf(state), action)
-      return { ...state, ...res.core, chat: [...state.chat, ...res.messages] }
+      return {
+        ...state,
+        ...res.core,
+        chat: withDailyIncomeNotice([...state.chat, ...res.messages], res.core, action.date),
+      }
     }
 
     case 'asset/delete': {
@@ -300,7 +321,7 @@ function reducer(state: AppState, action: Action): AppState {
       return {
         ...state,
         ...sold.core,
-        chat: [...state.chat, ...replies],
+        chat: withDailyIncomeNotice([...state.chat, ...replies], sold.core, today()),
         snapshots: anchor ? pushSnapshot(state, before, anchor.id) : state.snapshots,
       }
     }
@@ -370,7 +391,11 @@ function reducer(state: AppState, action: Action): AppState {
         { kind: 'waste', name: recipe.name, qty: action.qty, unit: recipe.yieldUnit, reason: action.reason, raw: '' },
         action.date,
       )
-      return { ...state, ...res.core, chat: [...state.chat, ...res.messages] }
+      return {
+        ...state,
+        ...res.core,
+        chat: withDailyIncomeNotice([...state.chat, ...res.messages], res.core, action.date),
+      }
     }
 
     case 'sale/delete': {

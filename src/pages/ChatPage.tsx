@@ -50,6 +50,18 @@ export default function ChatPage({
   const messages = useMemo(() => state.chat.filter((m) => m.channel === channel), [state.chat, channel])
   const { people, currentPerson } = state.settings
 
+  /**
+   * ปุ่มยืนยันสูตรต้องเหลือชุดเดียวที่กดได้ — ของข้อความเก่าที่ยืนยันไปแล้ว
+   * ต้องหายไป ไม่งั้นกดผิดอันแล้วงงว่าทำไมไม่มีอะไรเกิดขึ้น
+   */
+  const liveConfirmId = useMemo(() => {
+    if (!state.pendingRecipe) return null
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].actions?.some((a) => a.kind === 'confirmRecipe')) return messages[i].id
+    }
+    return null
+  }, [state.pendingRecipe, messages])
+
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: 'end' })
   }, [messages.length])
@@ -133,6 +145,7 @@ export default function ChatPage({
                 key={m.id}
                 message={m}
                 canUndo={!!m.undoable && undoableIds.has(m.id)}
+                confirmLive={m.id === liveConfirmId}
                 onUndo={() => dispatch({ type: 'chat/undo', msgId: m.id })}
                 onAction={runAction}
               />
@@ -215,15 +228,21 @@ function UserBubble({ message, showName }: { message: ChatMessage; showName: boo
 function BotBubble({
   message,
   canUndo,
+  confirmLive,
   onUndo,
   onAction,
 }: {
   message: ChatMessage
   canUndo: boolean
+  /** true เมื่อปุ่มยืนยันสูตรของข้อความนี้ยังกดได้อยู่ */
+  confirmLive: boolean
   onUndo: () => void
   onAction: (a: ChatAction) => void
 }) {
   const tone = TONE_STYLE[message.tone ?? 'info'] ?? TONE_STYLE.info
+  const isRecipeAction = (kind: ChatAction['kind']) => kind === 'confirmRecipe' || kind === 'cancelRecipe'
+  // ปุ่มยืนยันของสูตรที่จัดการไปแล้ว ให้ซ่อน เหลือแต่ปุ่มอื่นที่ยังมีความหมาย
+  const actions = (message.actions ?? []).filter((a) => !isRecipeAction(a.kind) || confirmLive)
   return (
     <div className="flex justify-start">
       <div className={`max-w-[92%] rounded-2xl rounded-bl-md border px-3.5 py-3 ${tone.bubble}`}>
@@ -243,9 +262,9 @@ function BotBubble({
           </dl>
         )}
 
-        {(canUndo || message.actions?.length) && (
+        {(canUndo || actions.length > 0) && (
           <div className="mt-3 flex flex-wrap gap-2">
-            {message.actions?.map((a, i) => (
+            {actions.map((a, i) => (
               <button
                 key={i}
                 type="button"
@@ -253,9 +272,7 @@ function BotBubble({
                 className={a.kind === 'confirmRecipe' ? 'btn-primary btn-sm' : 'btn-outline btn-sm'}
               >
                 {a.label}
-                {a.kind !== 'confirmRecipe' && a.kind !== 'cancelRecipe' && (
-                  <Icon name="chevron" className="size-3.5" />
-                )}
+                {!isRecipeAction(a.kind) && <Icon name="chevron" className="size-3.5" />}
               </button>
             ))}
             {canUndo && (

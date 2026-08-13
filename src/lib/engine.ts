@@ -1290,6 +1290,41 @@ export function moneyHelpMessages(): ChatMessage[] {
   ]
 }
 
+
+/**
+ * ข้อความสรุป "รายรับของขาย" ของทั้งวัน สำหรับส่งไปช่องรายรับ-รายจ่าย
+ * รวมทุกเมนูที่ขายได้ในวันนั้น (จำนวนที่ขายได้ × ราคาต่อหน่วย) เป็นยอดเดียว
+ *
+ * ใช้ id คงที่ต่อหนึ่งวัน เพื่อให้แก้ยอดกี่รอบก็มีสรุปของวันนั้นอยู่ข้อความเดียว
+ * ไม่ใช่กองข้อความซ้ำกันจนอ่านไม่รู้เรื่อง
+ */
+export function dailyIncomeMessageId(date: string): string {
+  return `daily-income:${date}`
+}
+
+export function dailyIncomeMessage(core: CoreState, date: string): ChatMessage | null {
+  const sold = core.sales.filter((s) => s.date === date && s.qty > 0)
+  if (!sold.length) return null
+
+  const total = sold.reduce((sum, s) => sum + s.revenue, 0)
+  const details = sold.map((s) => ({
+    label: s.recipeName,
+    value: `${num(s.qty)} ${s.unit} × ${money(s.unitPrice)} = ${money(s.revenue)}`,
+  }))
+  details.push({ label: 'รวมรายรับของขาย', value: money(total) })
+  details.push({ label: 'บันทึกแล้ว', value: 'นับเป็นรายรับในบัญชีให้แล้ว ไม่ต้องบันทึกซ้ำ' })
+
+  return {
+    id: dailyIncomeMessageId(date),
+    channel: 'money',
+    role: 'bot',
+    at: new Date().toISOString(),
+    tone: 'ok',
+    text: `รายรับของขาย · ${dayLabel(date)}`,
+    details,
+  }
+}
+
 /* --------------------------------------------------------------------------
    ตัวสั่งงานหลัก
 -------------------------------------------------------------------------- */
