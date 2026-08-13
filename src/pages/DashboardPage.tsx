@@ -1,37 +1,15 @@
 import { useMemo, useState } from 'react'
 import { useStore } from '../lib/store'
 import { lowStockItems, stockValue, summarize } from '../lib/calc'
-import { addDays, baht, dateText, dayLabel, money, num, qtyText, today } from '../lib/format'
+import { baht, dayLabel, money, num, qtyText } from '../lib/format'
 import { DailyBars, MenuRanking } from '../components/Charts'
-import { Card, Chip, Empty, Icon, Segmented, Stat } from '../components/ui'
-
-type RangeKey = 'today' | '7d' | '30d' | 'month'
-
-const RANGES: { value: RangeKey; label: string }[] = [
-  { value: 'today', label: 'วันนี้' },
-  { value: '7d', label: '7 วัน' },
-  { value: '30d', label: '30 วัน' },
-  { value: 'month', label: 'เดือนนี้' },
-]
-
-function rangeOf(key: RangeKey): { from: string; to: string } {
-  const to = today()
-  switch (key) {
-    case 'today':
-      return { from: to, to }
-    case '7d':
-      return { from: addDays(to, -6), to }
-    case '30d':
-      return { from: addDays(to, -29), to }
-    case 'month':
-      return { from: `${to.slice(0, 7)}-01`, to }
-  }
-}
+import DateRangePicker, { presetRange, rangeLabel } from '../components/DateRange'
+import { Card, Chip, Empty, Icon, Stat } from '../components/ui'
 
 export default function DashboardPage() {
   const { state } = useStore()
-  const [range, setRange] = useState<RangeKey>('7d')
-  const { from, to } = rangeOf(range)
+  const [range, setRange] = useState(() => presetRange('7d'))
+  const { from, to } = range
   const s = useMemo(() => summarize(state, from, to), [state, from, to])
 
   const low = useMemo(() => lowStockItems(state.items), [state.items])
@@ -50,14 +28,12 @@ export default function DashboardPage() {
 
   return (
     <div className="mx-auto max-w-3xl space-y-4 p-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="space-y-2.5">
         <div>
           <h1 className="text-[17px] font-bold text-ink">สรุปการขาย</h1>
-          <p className="text-[13px] text-ink-3">
-            {range === 'today' ? dayLabel(to) : `${dateText(from)} – ${dateText(to)}`}
-          </p>
+          <p className="text-[13px] text-ink-3">{rangeLabel(range)}</p>
         </div>
-        <Segmented options={RANGES} value={range} onChange={setRange} size="sm" />
+        <DateRangePicker value={range} onChange={setRange} presets={['today', '7d', '30d', 'month', 'lastMonth']} />
       </div>
 
       {!hasData ? (
@@ -87,7 +63,10 @@ export default function DashboardPage() {
             />
           </div>
 
-          <Card title="ยอดขายเทียบต้นทุนรายวัน">
+          <Card
+            title="ยอดขายเทียบต้นทุนรายวัน"
+            subtitle={s.series.length > 31 ? 'ช่วงนี้ยาวเกิน 1 เดือน กราฟแสดง 31 วันสุดท้าย' : undefined}
+          >
             <DailyBars series={s.series} />
           </Card>
 

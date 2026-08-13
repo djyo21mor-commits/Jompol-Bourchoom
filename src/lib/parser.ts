@@ -690,7 +690,8 @@ export function parseLine(input: string, channel: ParseChannel = 'shop'): Parsed
     case 'help':
       return { kind: 'help', raw }
     case 'purchase':
-      return parsePurchase(intent.rest, raw)
+      // ช่องเงินไม่มีสต็อก — "ซื้อทองคำ จำนวน 10000 บาท ที่ราคาบาทละ 65000" คือการซื้อทรัพย์สิน
+      return channel === 'money' ? parseAsset(intent.rest, raw) : parsePurchase(intent.rest, raw)
     case 'produce':
     case 'sell':
     case 'carryover':

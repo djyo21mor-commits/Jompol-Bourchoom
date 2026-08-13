@@ -3,31 +3,20 @@ import type { Transaction, TxKind } from '../types'
 import { TX_KIND_LABEL } from '../types'
 import { useStore } from '../lib/store'
 import { uid } from '../lib/engine'
-import {
-  buildMoneyEntries,
-  groupByDay,
-  monthLabel,
-  monthRange,
-  shiftMonth,
-  summarizeMoney,
-  SOURCE_LABEL,
-  type MoneyEntry,
-} from '../lib/money'
+import { buildMoneyEntries, groupByDay, summarizeMoney, SOURCE_LABEL, type MoneyEntry } from '../lib/money'
 import { baht, dateText, dayLabel, money, num, today } from '../lib/format'
 import { RankBars } from '../components/Charts'
+import DateRangePicker, { presetRange, rangeLabel } from '../components/DateRange'
 import { Card, Chip, ConfirmButton, Empty, Field, Icon, Modal, NumberInput, Segmented, Stat } from '../components/ui'
-
-function currentMonth(): string {
-  return today().slice(0, 7)
-}
 
 export default function MoneyPage() {
   const { state, dispatch } = useStore()
-  const [month, setMonth] = useState(currentMonth)
+  const [range, setRange] = useState(() => presetRange('month'))
   const [editing, setEditing] = useState<Transaction | null>(null)
   const [filter, setFilter] = useState<'all' | TxKind>('all')
 
-  const { from, to } = monthRange(month)
+  const { from, to } = range
+  const inRange = (d: string) => d >= from && d <= to
   const entries = useMemo(() => buildMoneyEntries(state, from, to), [state, from, to])
   const summary = useMemo(() => summarizeMoney(entries), [entries])
 
@@ -37,7 +26,7 @@ export default function MoneyPage() {
   )
   const days = useMemo(() => groupByDay(visible), [visible])
 
-  const monthAssets = useMemo(
+  const rangeAssets = useMemo(
     () => state.assets.filter((a) => a.date >= from && a.date <= to).sort((a, b) => b.date.localeCompare(a.date)),
     [state.assets, from, to],
   )
@@ -46,7 +35,7 @@ export default function MoneyPage() {
   function newTx(kind: TxKind) {
     setEditing({
       id: uid('t'),
-      date: month === currentMonth() ? today() : to,
+      date: inRange(today()) ? today() : to,
       kind,
       category: '',
       detail: '',
@@ -58,38 +47,16 @@ export default function MoneyPage() {
 
   return (
     <div className="mx-auto max-w-3xl space-y-4 p-4">
-      <div className="flex items-center justify-between gap-2">
+      <div className="space-y-2.5">
         <div className="min-w-0">
           <h1 className="text-[17px] font-bold text-ink">บัญชีรายรับ-รายจ่าย</h1>
-          <p className="truncate text-[13px] text-ink-3">{monthLabel(month)}</p>
+          <p className="truncate text-[13px] text-ink-3">{rangeLabel(range)}</p>
         </div>
-        <div className="flex shrink-0 items-center gap-1.5">
-          <button
-            type="button"
-            aria-label="เดือนก่อนหน้า"
-            onClick={() => setMonth((m) => shiftMonth(m, -1))}
-            className="btn-outline !px-2.5"
-          >
-            <Icon name="chevron" className="size-4 rotate-180" />
-          </button>
-          <button
-            type="button"
-            onClick={() => setMonth(currentMonth())}
-            disabled={month === currentMonth()}
-            className="btn-ghost btn-sm disabled:opacity-40"
-          >
-            เดือนนี้
-          </button>
-          <button
-            type="button"
-            aria-label="เดือนถัดไป"
-            onClick={() => setMonth((m) => shiftMonth(m, 1))}
-            disabled={month >= currentMonth()}
-            className="btn-outline !px-2.5 disabled:opacity-40"
-          >
-            <Icon name="chevron" className="size-4" />
-          </button>
-        </div>
+        <DateRangePicker
+          value={range}
+          onChange={setRange}
+          presets={['month', 'lastMonth', '7d', '30d', 'today']}
+        />
       </div>
 
       <div className="grid grid-cols-3 gap-3">
@@ -98,7 +65,7 @@ export default function MoneyPage() {
         <Stat
           label="คงเหลือ"
           value={baht(summary.net, 0)}
-          sub={summary.net >= 0 ? 'เดือนนี้เหลือเงิน' : 'เดือนนี้จ่ายเกิน'}
+          sub={summary.net >= 0 ? 'ช่วงนี้เหลือเงิน' : 'ช่วงนี้จ่ายเกิน'}
           tone={summary.net >= 0 ? 'good' : 'bad'}
         />
       </div>
@@ -124,33 +91,33 @@ export default function MoneyPage() {
       </Card>
 
       <div className="grid gap-3 sm:grid-cols-2">
-        <Card title="รายจ่ายมากสุด" subtitle="เดือนนี้">
+        <Card title="รายจ่ายมากสุด" subtitle={rangeLabel(range)}>
           <RankBars
             rows={summary.byCategory
               .filter((c) => c.kind === 'expense')
               .slice(0, 6)
               .map((c) => ({ label: c.category, amount: c.amount, sub: `${num(c.count)} รายการ` }))}
             tone="bad"
-            emptyText="ยังไม่มีรายจ่ายในเดือนนี้"
+            emptyText="ยังไม่มีรายจ่ายในช่วงนี้"
           />
         </Card>
-        <Card title="รายรับมากสุด" subtitle="เดือนนี้">
+        <Card title="รายรับมากสุด" subtitle={rangeLabel(range)}>
           <RankBars
             rows={summary.byCategory
               .filter((c) => c.kind === 'income')
               .slice(0, 6)
               .map((c) => ({ label: c.category, amount: c.amount, sub: `${num(c.count)} รายการ` }))}
             tone="good"
-            emptyText="ยังไม่มีรายรับในเดือนนี้"
+            emptyText="ยังไม่มีรายรับในช่วงนี้"
           />
         </Card>
       </div>
 
 
-      {monthAssets.length > 0 && (
-        <Card title="ทรัพย์สินที่ซื้อเดือนนี้" subtitle="เงินที่จ่ายนับเป็นรายจ่ายไปแล้ว แต่มูลค่ายังอยู่กับเรา">
+      {rangeAssets.length > 0 && (
+        <Card title="ทรัพย์สินที่ซื้อในช่วงนี้" subtitle="เงินที่จ่ายนับเป็นรายจ่ายไปแล้ว แต่มูลค่ายังอยู่กับเรา">
           <ul className="divide-y divide-line">
-            {monthAssets.map((a) => (
+            {rangeAssets.map((a) => (
               <li key={a.id} className="flex items-center gap-3 py-2.5 first:pt-0 last:pb-0">
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-[14.5px] font-medium text-ink">{a.name}</div>
@@ -208,7 +175,7 @@ export default function MoneyPage() {
         <Card bodyClass="p-0">
           <Empty
             icon="calc"
-            title="ยังไม่มีรายการในเดือนนี้"
+            title="ยังไม่มีรายการในช่วงนี้"
             hint='พิมพ์ในแชทได้เลย เช่น "จ่ายค่าเช่าร้าน 5000 บาท" หรือกดปุ่มเพิ่มรายการด้านบน'
           />
         </Card>
@@ -341,8 +308,7 @@ function TxEditor({
   const set = <K extends keyof Transaction>(key: K, value: Transaction[K]) =>
     setDraft((d) => ({ ...d, [key]: value }))
 
-  const categories =
-    draft.kind === 'expense' ? state.settings.expenseCategories : state.settings.incomeCategories
+  const categories = state.settings.categories.filter((c) => c.kind === draft.kind)
 
   const valid = draft.category.trim().length > 0 && draft.amount > 0
 
@@ -399,14 +365,14 @@ function TxEditor({
           <div className="-mt-2 flex flex-wrap gap-2">
             {categories.map((c) => (
               <button
-                key={c}
+                key={c.id}
                 type="button"
-                onClick={() => set('category', c)}
+                onClick={() => set('category', c.name)}
                 className={`rounded-lg px-2.5 py-1.5 text-[12.5px] font-medium transition-colors ${
-                  draft.category === c ? 'bg-brand text-brand-ink' : 'bg-surface-2 text-ink-2 hover:bg-surface-3'
+                  draft.category === c.name ? 'bg-brand text-brand-ink' : 'bg-surface-2 text-ink-2 hover:bg-surface-3'
                 }`}
               >
-                {c}
+                {c.name}
               </button>
             ))}
           </div>

@@ -1,5 +1,6 @@
 import type {
   Asset,
+  MoneyCategory,
   BaseUnit,
   ChatMessage,
   CoreState,
@@ -8,6 +9,7 @@ import type {
   PendingRecipe,
   Recipe,
   Transaction,
+  TxKind,
 } from '../types'
 import { CATEGORY_LABEL } from '../types'
 import type { ParsedCommand } from './parser'
@@ -74,13 +76,66 @@ export function findByName<T extends { name: string }>(list: T[], name: string):
   return [...loose].sort((a, b) => norm(b.name).length - norm(a.name).length)[0]
 }
 
+
+/* --------------------------------------------------------------------------
+   จับคำที่พิมพ์ -> หมวดหมู่
+-------------------------------------------------------------------------- */
+
+export interface CategoryMatch {
+  /** ชื่อหมวดที่จะบันทึกจริง */
+  name: string
+  /** หมวดที่มีอยู่แล้วซึ่งตรงกับที่พิมพ์ (ถ้ามี) */
+  matched?: MoneyCategory
+  /** true เมื่อเข้าหมวดเพราะไปตรงกับ "คำสั้น" ไม่ใช่ชื่อหมวดเต็ม */
+  viaKeyword: boolean
+}
+
+/**
+ * หาว่าคำที่พิมพ์เข้าหมวดไหน
+ * ลำดับ: ชื่อหมวดตรงเป๊ะ -> คำสั้นตรงเป๊ะ -> ไม่เจอก็ถือเป็นหมวดใหม่ตามที่พิมพ์
+ * เทียบแบบไม่สนช่องว่างและตัวพิมพ์ใหญ่เล็ก คนพิมพ์เร็วๆ จะได้ไม่พลาด
+ */
+export function resolveCategory(categories: MoneyCategory[], typed: string, kind: 'income' | 'expense'): CategoryMatch {
+  const want = norm(typed)
+  const sameKind = categories.filter((c) => c.kind === kind)
+
+  const byName = sameKind.find((c) => norm(c.name) === want)
+  if (byName) return { name: byName.name, matched: byName, viaKeyword: false }
+
+  const byKeyword = sameKind.find((c) => c.keywords.some((k) => norm(k) === want))
+  if (byKeyword) return { name: byKeyword.name, matched: byKeyword, viaKeyword: true }
+
+  return { name: typed, viaKeyword: false }
+}
+
+/** เจอหมวดใหม่ที่ยังไม่เคยใช้ ให้จำไว้เป็นตัวเลือกครั้งหน้า (ถ้ามีอยู่แล้วคืนค่าเดิม) */
+export function rememberCategory<S extends { categories: MoneyCategory[] }>(
+  settings: S,
+  name: string,
+  kind: TxKind,
+  keywords: string[] = [],
+): S {
+  const clean = name.trim()
+  if (!clean) return settings
+  if (resolveCategory(settings.categories, clean, kind).matched) return settings
+  return {
+    ...settings,
+    categories: [...settings.categories, { id: uid('c'), name: clean, kind, keywords }],
+  }
+}
+
 /* --------------------------------------------------------------------------
    ซื้อของเข้าร้าน
 -------------------------------------------------------------------------- */
 
 const BASE_NAME: Record<BaseUnit, string> = { g: 'น้ำหนัก (กรัม)', ml: 'ปริมาตร (มิลลิลิตร)', pcs: 'จำนวนชิ้น' }
 
-function applyPurchase(core: CoreState, cmd: Extract<ParsedCommand, { kind: 'purchase' }>, date: string): RunResult {
+function applyPurchase(
+  core: CoreState,
+  cmd: Extract<ParsedCommand, { kind: 'purchase' }>,
+  date: string,
+  srcMsgId?: string,
+): RunResult {
   const existing = findByName(core.items, cmd.name)
 
   if (existing && existing.base !== cmd.base) {
@@ -143,6 +198,7 @@ function applyPurchase(core: CoreState, cmd: Extract<ParsedCommand, { kind: 'pur
     total: cmd.total,
     unitCost,
     note: cmd.raw,
+    srcMsgId,
     createdAt: new Date().toISOString(),
   }
 
@@ -387,7 +443,7 @@ function missingRecipeMsg(name: string): ChatMessage {
   })
 }
 
-export function produce(core: CoreState, recipe: Recipe, qty: number, date: string): RunResult {
+export function produce(core: CoreState, recipe: Recipe, qty: number, date: string, srcMsgId?: string): RunResult {
   const scale = recipe.yieldQty > 0 ? qty / recipe.yieldQty : 0
   const cost = recipeCost(recipe, core.items, scale)
 
@@ -422,6 +478,7 @@ export function produce(core: CoreState, recipe: Recipe, qty: number, date: stri
     overheadCost: cost.overheadCost,
     totalCost: cost.totalCost,
     costPerUnit: cost.costPerUnit,
+    srcMsgId,
     createdAt: new Date().toISOString(),
   }
 
@@ -436,6 +493,7 @@ export function produce(core: CoreState, recipe: Recipe, qty: number, date: stri
     remaining: qty,
     costPerUnit: cost.costPerUnit,
     carriedOver: false,
+    srcMsgId,
     createdAt: new Date().toISOString(),
   }
 
@@ -497,7 +555,12 @@ export function produce(core: CoreState, recipe: Recipe, qty: number, date: stri
   }
 }
 
-function applyProduce(core: CoreState, cmd: Extract<ParsedCommand, { kind: 'produce' }>, date: string): RunResult {
+function applyProduce(
+  core: CoreState,
+  cmd: Extract<ParsedCommand, { kind: 'produce' }>,
+  date: string,
+  srcMsgId?: string,
+): RunResult {
   const recipe = findByName(core.recipes, cmd.name)
   if (!recipe) return { core, changed: false, messages: [missingRecipeMsg(cmd.name)] }
   if (!recipe.lines.length) {
@@ -512,7 +575,7 @@ function applyProduce(core: CoreState, cmd: Extract<ParsedCommand, { kind: 'prod
       ],
     }
   }
-  return produce(core, recipe, cmd.qty, date)
+  return produce(core, recipe, cmd.qty, date, srcMsgId)
 }
 
 /* --------------------------------------------------------------------------
@@ -547,7 +610,12 @@ function consumeLots(
   return { lots: next, taken: qty - left, cost, originalCost, lotIds }
 }
 
-function applySell(core: CoreState, cmd: Extract<ParsedCommand, { kind: 'sell' }>, date: string): RunResult {
+function applySell(
+  core: CoreState,
+  cmd: Extract<ParsedCommand, { kind: 'sell' }>,
+  date: string,
+  srcMsgId?: string,
+): RunResult {
   const recipe = findByName(core.recipes, cmd.name)
   if (!recipe) return { core, changed: false, messages: [missingRecipeMsg(cmd.name)] }
 
@@ -625,6 +693,7 @@ function applySell(core: CoreState, cmd: Extract<ParsedCommand, { kind: 'sell' }
     revenue,
     cost: taken.cost,
     lotIds: taken.lotIds,
+    srcMsgId,
     createdAt: new Date().toISOString(),
   }
 
@@ -679,6 +748,7 @@ function applyCarryover(
   core: CoreState,
   cmd: Extract<ParsedCommand, { kind: 'carryover' }>,
   date: string,
+  srcMsgId?: string,
 ): RunResult {
   const recipe = findByName(core.recipes, cmd.name)
   const recipeId = recipe?.id ?? uid('r-ghost')
@@ -717,6 +787,8 @@ function applyCarryover(
         costPerUnit: 0,
         originalCostPerUnit: lot.costPerUnit,
         carriedOver: true,
+        fromLotId: lot.id,
+        srcMsgId,
         createdAt: new Date().toISOString(),
       })
     }
@@ -735,6 +807,7 @@ function applyCarryover(
       remaining: left,
       costPerUnit: 0,
       carriedOver: true,
+      srcMsgId,
       createdAt: new Date().toISOString(),
     })
   }
@@ -776,7 +849,12 @@ function applyCarryover(
    ของเสีย / ทิ้ง
 -------------------------------------------------------------------------- */
 
-function applyWaste(core: CoreState, cmd: Extract<ParsedCommand, { kind: 'waste' }>, date: string): RunResult {
+function applyWaste(
+  core: CoreState,
+  cmd: Extract<ParsedCommand, { kind: 'waste' }>,
+  date: string,
+  srcMsgId?: string,
+): RunResult {
   const recipe = findByName(core.recipes, cmd.name)
   if (!recipe) return { core, changed: false, messages: [missingRecipeMsg(cmd.name)] }
 
@@ -797,7 +875,9 @@ function applyWaste(core: CoreState, cmd: Extract<ParsedCommand, { kind: 'waste'
     qty: taken.taken,
     unit: recipe.yieldUnit,
     cost: taken.originalCost,
+    lotIds: taken.lotIds,
     reason: cmd.reason,
+    srcMsgId,
     createdAt: new Date().toISOString(),
   }
 
@@ -860,46 +940,44 @@ function applyMoney(
   core: CoreState,
   cmd: Extract<ParsedCommand, { kind: 'expense' | 'income' }>,
   date: string,
+  srcMsgId?: string,
 ): RunResult {
   const isExpense = cmd.kind === 'expense'
-  const known = isExpense ? core.settings.expenseCategories : core.settings.incomeCategories
-
-  // ถ้าพิมพ์ชื่อที่ใกล้เคียงหมวดเดิม ให้ยึดชื่อเดิมไว้ จะได้ไม่มีหมวดซ้ำซ้อนสะสม
-  const matched = known.find((c) => norm(c) === norm(cmd.category))
-  const category = matched ?? cmd.category
+  const match = resolveCategory(core.settings.categories, cmd.category, cmd.kind)
 
   const tx: Transaction = {
     id: uid('t'),
     date,
     kind: cmd.kind,
-    category,
+    category: match.name,
     detail: cmd.detail,
     amount: cmd.amount,
     by: core.settings.currentPerson,
+    srcMsgId,
     createdAt: new Date().toISOString(),
   }
 
   // หมวดใหม่ที่ยังไม่เคยใช้ ให้จำไว้เป็นตัวเลือกครั้งหน้า
-  const settings = matched
-    ? core.settings
-    : {
-        ...core.settings,
-        [isExpense ? 'expenseCategories' : 'incomeCategories']: [...known, category],
-      }
+  const settings = rememberCategory(core.settings, match.name, cmd.kind)
 
   const details = [
-    { label: 'หมวดหมู่', value: category },
+    { label: 'หมวดหมู่', value: match.name },
     { label: 'จำนวนเงิน', value: money(cmd.amount, 2) },
     { label: 'วันที่', value: dayLabel(date) },
   ]
   if (cmd.detail) details.push({ label: 'หมายเหตุ', value: cmd.detail })
-  if (!matched) details.push({ label: 'หมวดใหม่', value: 'จำไว้ให้แล้ว ครั้งหน้าเลือกจากรายการได้เลย' })
+  if (match.viaKeyword) {
+    details.push({ label: 'เข้าหมวดนี้เพราะ', value: `"${cmd.category}" เป็นคำสั้นของหมวด "${match.name}"` })
+  }
+  if (!match.matched) {
+    details.push({ label: 'หมวดใหม่', value: 'จำไว้ให้แล้ว ตั้งคำสั้นเพิ่มได้ในหน้าตั้งค่า' })
+  }
 
   return {
     core: { ...core, transactions: [tx, ...core.transactions], settings },
     changed: true,
     messages: [
-      botMsg(`บันทึก${isExpense ? 'รายจ่าย' : 'รายรับ'}แล้ว · ${category}`, {
+      botMsg(`บันทึก${isExpense ? 'รายจ่าย' : 'รายรับ'}แล้ว · ${match.name}`, {
         channel: 'money',
         tone: 'ok',
         undoable: true,
@@ -909,12 +987,16 @@ function applyMoney(
   }
 }
 
-
 /* --------------------------------------------------------------------------
    ทรัพย์สิน
 -------------------------------------------------------------------------- */
 
-function applyAsset(core: CoreState, cmd: Extract<ParsedCommand, { kind: 'asset' }>, date: string): RunResult {
+function applyAsset(
+  core: CoreState,
+  cmd: Extract<ParsedCommand, { kind: 'asset' }>,
+  date: string,
+  srcMsgId?: string,
+): RunResult {
   const by = core.settings.currentPerson
   const unitLabel = cmd.unitLabel ?? ''
   // ปริมาณที่ได้ = เงินที่จ่าย ÷ ราคาต่อหน่วย เช่น จ่าย 10,000 ทองบาทละ 65,000 -> ได้ 0.1538 บาท
@@ -929,6 +1011,7 @@ function applyAsset(core: CoreState, cmd: Extract<ParsedCommand, { kind: 'asset'
     unitPrice: cmd.unitPrice ?? 0,
     amount: cmd.amount,
     by,
+    srcMsgId,
     createdAt: new Date().toISOString(),
   }
 
@@ -941,13 +1024,11 @@ function applyAsset(core: CoreState, cmd: Extract<ParsedCommand, { kind: 'asset'
     detail: cmd.name,
     amount: cmd.amount,
     by,
+    srcMsgId,
     createdAt: new Date().toISOString(),
   }
 
-  const known = core.settings.expenseCategories
-  const settings = known.includes('ซื้อทรัพย์สิน')
-    ? core.settings
-    : { ...core.settings, expenseCategories: [...known, 'ซื้อทรัพย์สิน'] }
+  const settings = rememberCategory(core.settings, 'ซื้อทรัพย์สิน', 'expense', ['ทรัพย์สิน'])
 
   const details = [
     { label: 'เงินที่จ่าย', value: money(cmd.amount) },
@@ -1081,6 +1162,9 @@ export function helpMessages(): ChatMessage[] {
       ],
     }),
     botMsg('พิมพ์หลายบรรทัดพร้อมกันได้ — บรรทัดต่อไปจะถือว่าเป็นคำสั่งเดียวกับบรรทัดแรก', { tone: 'info' }),
+    botMsg('พิมพ์ผิด กดไอคอนถังขยะข้างข้อความได้เลย ระบบจะถอนสต็อก ยอดขาย และตัวเลขในสรุปที่ข้อความนั้นทำไว้ออกให้ด้วย', {
+      tone: 'info',
+    }),
   ]
 }
 
@@ -1280,10 +1364,22 @@ export function moneyHelpMessages(): ChatMessage[] {
         { label: 'ใส่คำว่าจ่ายก็ได้', value: 'จ่ายค่าเช่าร้าน 5000 บาท' },
         { label: 'เงินเข้า ใส่ + นำหน้า', value: '+ รับจ้างทำเค้ก 800' },
         { label: 'หรือพิมพ์เต็ม', value: 'รับเงินค่าจ้างทำเค้ก 800 บาท' },
-        { label: 'ทรัพย์สิน', value: 'ซื้อทรัพย์สินทองคำ จำนวน 10000 บาท ที่ราคาบาทละ 65000 บาท' },
+        { label: 'ทรัพย์สิน', value: 'ซื้อทองคำ จำนวน 10000 บาท ที่ราคาบาทละ 65000 บาท' },
+      ],
+    }),
+    botMsg('คำสั้นอย่าง "กิน" หรือ "ค่าไฟ" ตั้งเองได้ในหน้าตั้งค่า > หมวดหมู่รายรับ-รายจ่าย', {
+      channel: 'money',
+      tone: 'info',
+      details: [
+        { label: 'ตัวอย่าง', value: 'หมวด "ค่าอาหาร" ตั้งคำสั้นเป็น กิน / อาหาร / ข้าว' },
+        { label: 'พิมพ์แล้วได้อะไร', value: 'พิมพ์ "กิน 100" → บันทึกเป็นค่าอาหาร 100 บาท' },
       ],
     }),
     botMsg('ค่าซื้อของสำหรับขาย ระบบดึงมาจากช่องของขายให้เองแล้ว ไม่ต้องพิมพ์ซ้ำที่นี่', {
+      channel: 'money',
+      tone: 'info',
+    }),
+    botMsg('พิมพ์ผิดหรือบันทึกซ้ำ กดไอคอนถังขยะข้างข้อความได้เลย ระบบจะถอนข้อมูลของข้อความนั้นออกจากสรุปให้ด้วย', {
       channel: 'money',
       tone: 'info',
     }),
@@ -1326,30 +1422,137 @@ export function dailyIncomeMessage(core: CoreState, date: string): ChatMessage |
 }
 
 /* --------------------------------------------------------------------------
+   ลบข้อความในแชท พร้อมถอนข้อมูลที่ข้อความนั้นสร้างไว้
+   ทุกรายการที่เกิดจากแชทจะติด srcMsgId ของข้อความต้นทางไว้ ตรงนี้จึงตามเก็บได้ครบ
+-------------------------------------------------------------------------- */
+
+export interface DeleteResult {
+  core: CoreState
+  changed: boolean
+  /** สรุปสั้นๆ ว่าถอนอะไรออกไปบ้าง ใช้ตอบกลับในแชท */
+  removed: string[]
+}
+
+export function deleteByMessage(core: CoreState, msgId: string): DeleteResult {
+  const removed: string[] = []
+  let items = core.items
+  let lots = core.lots
+
+  /** คืนของกลับเข้าล็อตที่เคยถูกตัดไป ไม่ให้เกินจำนวนเดิมของล็อต */
+  const giveBack = (lotIds: string[] | undefined, qty: number) => {
+    if (!lotIds?.length) return
+    let left = qty
+    lots = lots.map((l) => {
+      if (left <= 1e-9 || !lotIds.includes(l.id)) return l
+      const room = l.qty - l.remaining
+      const give = Math.min(room, left)
+      left -= give
+      return { ...l, remaining: l.remaining + give }
+    })
+  }
+
+  // 1) การขาย — ของที่ขายไปกลับเข้าล็อตเดิม
+  const sales = core.sales.filter((s) => s.srcMsgId === msgId)
+  for (const s of sales) giveBack(s.lotIds, s.qty)
+  if (sales.length) removed.push(`ยอดขาย ${num(sales.reduce((a, s) => a + s.revenue, 0))} บาท`)
+
+  // 2) ของเสีย — คืนกลับเข้าล็อตเช่นกัน
+  const wastes = core.wastes.filter((w) => w.srcMsgId === msgId)
+  for (const w of wastes) giveBack(w.lotIds, w.qty)
+  if (wastes.length) removed.push(`ของเสีย ${wastes.length} รายการ`)
+
+  // 3) ล็อตที่ข้อความนี้สร้าง — ของยกมาต้องคืนจำนวนกลับล็อตต้นทางก่อนทิ้ง
+  const ownLots = lots.filter((l) => l.srcMsgId === msgId)
+  for (const l of ownLots) {
+    if (l.carriedOver && l.fromLotId) giveBack([l.fromLotId], l.remaining)
+  }
+  if (ownLots.some((l) => l.carriedOver)) removed.push('ของยกมา')
+  lots = lots.filter((l) => l.srcMsgId !== msgId)
+
+  // 4) การผลิต — คืนวัตถุดิบที่ตัดไปกลับเข้าสต็อก
+  const productions = core.productions.filter((p) => p.srcMsgId === msgId)
+  if (productions.length) {
+    const back = new Map<string, number>()
+    for (const p of productions) {
+      for (const u of p.used) back.set(u.itemId, (back.get(u.itemId) ?? 0) + u.qty)
+    }
+    items = items.map((i) => (back.has(i.id) ? { ...i, stock: i.stock + back.get(i.id)! } : i))
+    removed.push(`การผลิต ${productions.map((p) => `${p.recipeName} ${num(p.qty)} ${p.unit}`).join(', ')}`)
+  }
+
+  // 5) การซื้อของ — ถอนของออกจากสต็อกและถอนต้นทุนออกจากค่าเฉลี่ย
+  const purchases = core.purchases.filter((p) => p.srcMsgId === msgId)
+  for (const p of purchases) {
+    items = items.map((i) => {
+      if (i.id !== p.itemId) return i
+      const stock = i.stock - p.qty
+      const totalValue = i.stock * i.avgCost - p.total
+      return { ...i, stock, avgCost: stock > 1e-9 ? Math.max(0, totalValue / stock) : 0 }
+    })
+  }
+  if (purchases.length) {
+    removed.push(`ค่าซื้อของ ${num(purchases.reduce((a, p) => a + p.total, 0))} บาท (${purchases.map((p) => p.itemName).join(', ')})`)
+  }
+
+  // 6) รายรับ-รายจ่ายและทรัพย์สินที่บันทึกจากข้อความนี้
+  const transactions = core.transactions.filter((t) => t.srcMsgId === msgId)
+  if (transactions.length) {
+    removed.push(transactions.map((t) => `${t.category} ${num(t.amount)} บาท`).join(', '))
+  }
+  const assets = core.assets.filter((a) => a.srcMsgId === msgId)
+  if (assets.length) removed.push(`ทรัพย์สิน ${assets.map((a) => a.name).join(', ')}`)
+
+  const changed =
+    sales.length > 0 ||
+    wastes.length > 0 ||
+    ownLots.length > 0 ||
+    productions.length > 0 ||
+    purchases.length > 0 ||
+    transactions.length > 0 ||
+    assets.length > 0
+
+  return {
+    core: {
+      ...core,
+      items,
+      lots,
+      sales: core.sales.filter((s) => s.srcMsgId !== msgId),
+      wastes: core.wastes.filter((w) => w.srcMsgId !== msgId),
+      productions: core.productions.filter((p) => p.srcMsgId !== msgId),
+      purchases: core.purchases.filter((p) => p.srcMsgId !== msgId),
+      transactions: core.transactions.filter((t) => t.srcMsgId !== msgId),
+      assets: core.assets.filter((a) => a.srcMsgId !== msgId),
+    },
+    changed,
+    removed,
+  }
+}
+
+/* --------------------------------------------------------------------------
    ตัวสั่งงานหลัก
 -------------------------------------------------------------------------- */
 
-export function runCommand(core: CoreState, cmd: ParsedCommand, date = today()): RunResult {
+export function runCommand(core: CoreState, cmd: ParsedCommand, date = today(), srcMsgId?: string): RunResult {
   switch (cmd.kind) {
     case 'purchase':
-      return applyPurchase(core, cmd, date)
+      return applyPurchase(core, cmd, date, srcMsgId)
     case 'recipe':
       return askRecipeConfirm(core, cmd)
     case 'produce':
-      return applyProduce(core, cmd, date)
+      return applyProduce(core, cmd, date, srcMsgId)
     case 'sell':
-      return applySell(core, cmd, date)
+      return applySell(core, cmd, date, srcMsgId)
     case 'carryover':
-      return applyCarryover(core, cmd, date)
+      return applyCarryover(core, cmd, date, srcMsgId)
     case 'waste':
-      return applyWaste(core, cmd, date)
+      return applyWaste(core, cmd, date, srcMsgId)
     case 'adjust':
       return applyAdjust(core, cmd)
     case 'expense':
     case 'income':
-      return applyMoney(core, cmd, date)
+      return applyMoney(core, cmd, date, srcMsgId)
     case 'asset':
-      return applyAsset(core, cmd, date)
+      return applyAsset(core, cmd, date, srcMsgId)
     case 'confirm':
       return cmd.yes ? commitPendingRecipe(core) : cancelPendingRecipe(core)
     case 'stock':

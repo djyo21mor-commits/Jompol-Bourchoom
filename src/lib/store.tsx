@@ -1,15 +1,28 @@
 import { createContext, useContext, useEffect, useMemo, useReducer, type ReactNode } from 'react'
-import type { AppState, ChatChannel, ChatMessage, CoreState, Item, Recipe, Settings, Transaction } from '../types'
+import type {
+  AppState,
+  ChatChannel,
+  ChatMessage,
+  CoreState,
+  Item,
+  MoneyCategory,
+  Recipe,
+  Settings,
+  Transaction,
+  TxKind,
+} from '../types'
 import { parseScript } from './parser'
 import {
   cancelPendingRecipe,
   commitPendingRecipe,
   dailyIncomeMessage,
   dailyIncomeMessageId,
+  deleteByMessage,
   helpMessages,
   moneyHelpMessages,
   produce,
   recordDailySheet,
+  rememberCategory,
   runCommand,
   uid,
 } from './engine'
@@ -18,17 +31,32 @@ import { today } from './format'
 const STORAGE_KEY = 'jompol-bakery/v1'
 const MAX_SNAPSHOTS = 20
 
+/** ตัวช่วยสร้างหมวดหมู่ตั้งต้น — id คงที่ตามชื่อ จะได้ไม่ซ้ำเวลารวมข้อมูล */
+function cat(name: string, kind: TxKind, keywords: string[]): MoneyCategory {
+  return { id: `c-${name}`, name, kind, keywords }
+}
+
 export const DEFAULT_SETTINGS: Settings = {
   shopName: 'ร้านขนมของฉัน',
   defaultOverhead: { labor: 0, water: 0, electric: 0, misc: 0 },
   defaultMarginPct: 30,
   priceMode: 'markup',
   priceRounding: 0,
-  expenseCategories: [
-    'ค่าเช่าร้าน', 'ค่าน้ำ', 'ค่าไฟ', 'ค่าแก๊ส', 'ค่าจ้างพนักงาน',
-    'ค่าเดินทาง', 'ค่าโทรศัพท์/เน็ต', 'ค่าอุปกรณ์', 'ค่าการตลาด', 'ค่าธรรมเนียม',
+  categories: [
+    cat('ค่าอาหาร', 'expense', ['กิน', 'อาหาร', 'ข้าว']),
+    cat('ค่าเช่าร้าน', 'expense', ['เช่า']),
+    cat('ค่าน้ำ', 'expense', ['น้ำ', 'ประปา']),
+    cat('ค่าไฟ', 'expense', ['ไฟ', 'ไฟฟ้า']),
+    cat('ค่าแก๊ส', 'expense', ['แก๊ส', 'ก๊าซ']),
+    cat('ค่าจ้างพนักงาน', 'expense', ['จ้าง', 'ลูกจ้าง']),
+    cat('ค่าเดินทาง', 'expense', ['รถ', 'น้ำมัน', 'เดินทาง']),
+    cat('ค่าโทรศัพท์/เน็ต', 'expense', ['เน็ต', 'โทรศัพท์', 'มือถือ']),
+    cat('ค่าอุปกรณ์', 'expense', ['อุปกรณ์']),
+    cat('ค่าการตลาด', 'expense', ['โฆษณา', 'การตลาด']),
+    cat('รับจ้างทำขนม', 'income', ['รับจ้าง']),
+    cat('ขายของอื่น', 'income', []),
+    cat('รายได้อื่น', 'income', []),
   ],
-  incomeCategories: ['รับจ้างทำขนม', 'ขายของอื่น', 'เงินทุนเพิ่ม', 'รายได้อื่น'],
   people: ['ฉัน'],
   currentPerson: 'ฉัน',
   theme: 'system',
@@ -87,6 +115,37 @@ function coreOf(state: AppState): CoreState {
   return { items, purchases, recipes, productions, lots, sales, wastes, transactions, assets, pendingRecipe, settings }
 }
 
+/**
+ * ข้อมูลเวอร์ชันเก่าเก็บหมวดหมู่เป็นรายชื่อสองก้อน (expenseCategories / incomeCategories)
+ * แปลงมาเป็นหมวดหมู่แบบใหม่ที่มีคำสั้นได้ โดยยกชื่อเดิมมาให้ครบ ไม่ให้ใครเสียข้อมูล
+ */
+function migrateSettings(saved: Partial<Settings> | undefined): Settings {
+  const merged = { ...DEFAULT_SETTINGS, ...(saved ?? {}) } as Settings & {
+    expenseCategories?: string[]
+    incomeCategories?: string[]
+  }
+  if (merged.categories?.length) {
+    delete merged.expenseCategories
+    delete merged.incomeCategories
+    return merged
+  }
+
+  const fromOld: MoneyCategory[] = [
+    ...(merged.expenseCategories ?? []).map((name) => cat(name, 'expense' as TxKind, [])),
+    ...(merged.incomeCategories ?? []).map((name) => cat(name, 'income' as TxKind, [])),
+  ]
+  // เติมคำสั้นจากค่าตั้งต้นให้หมวดที่ชื่อตรงกัน ผู้ใช้เดิมจะได้ใช้คำสั้นทันที
+  const withKeywords = fromOld.map((c) => {
+    const preset = DEFAULT_SETTINGS.categories.find((d) => d.name === c.name && d.kind === c.kind)
+    return preset ? { ...c, keywords: preset.keywords } : c
+  })
+  const missing = DEFAULT_SETTINGS.categories.filter((d) => !withKeywords.some((c) => c.name === d.name))
+
+  delete merged.expenseCategories
+  delete merged.incomeCategories
+  return { ...merged, categories: withKeywords.length ? [...withKeywords, ...missing] : DEFAULT_SETTINGS.categories }
+}
+
 function load(): AppState {
   if (typeof localStorage === 'undefined') return initialState()
   try {
@@ -97,7 +156,7 @@ function load(): AppState {
     return {
       ...base,
       ...saved,
-      settings: { ...DEFAULT_SETTINGS, ...(saved.settings ?? {}) },
+      settings: migrateSettings(saved.settings),
       chat: saved.chat?.length ? saved.chat : base.chat,
       snapshots: saved.snapshots ?? [],
     }
@@ -125,6 +184,7 @@ function save(state: AppState) {
 export type Action =
   | { type: 'chat/send'; text: string; channel: ChatChannel }
   | { type: 'chat/undo'; msgId: string }
+  | { type: 'chat/delete'; msgId: string }
   | { type: 'chat/clear'; channel: ChatChannel }
   | { type: 'chat/help'; channel: ChatChannel }
   | { type: 'recipe/confirm' }
@@ -183,8 +243,11 @@ function reducer(state: AppState, action: Action): AppState {
       let changed = false
       let soldToday = false
 
+      // สร้างข้อความของผู้ใช้ก่อน เพื่อผูก id ไว้กับทุกรายการที่เกิดจากข้อความนี้ (ใช้ตอนลบ)
+      const asked = userMessage(text, action.channel, state.settings.currentPerson)
+
       for (const cmd of parseScript(text, action.channel)) {
-        const res = runCommand(core, cmd, today())
+        const res = runCommand(core, cmd, today(), asked.id)
         core = res.core
         changed = changed || res.changed
         // ข้อความที่ไม่ได้ระบุช่องไว้เอง ให้ตอบกลับในช่องที่ผู้ใช้พิมพ์มา
@@ -213,7 +276,7 @@ function reducer(state: AppState, action: Action): AppState {
       const anchor = replies.find((m) => m.undoable)
       const snapshots = changed && anchor ? pushSnapshot(state, before, anchor.id) : state.snapshots
 
-      const chat = [...state.chat, userMessage(text, action.channel, state.settings.currentPerson), ...replies]
+      const chat = [...state.chat, asked, ...replies]
       return {
         ...state,
         ...core,
@@ -279,6 +342,42 @@ function reducer(state: AppState, action: Action): AppState {
       }
     }
 
+    case 'chat/delete': {
+      const target = state.chat.find((m) => m.id === action.msgId)
+      if (!target) return state
+
+      // ลบข้อความของผู้ใช้ = ลบคำตอบของบอทที่ตามมาด้วย (รวมที่เด้งไปช่องรายรับ-รายจ่าย)
+      const gone = new Set<string>([target.id])
+      if (target.role === 'user') {
+        const at = state.chat.findIndex((m) => m.id === target.id)
+        for (let i = at + 1; i < state.chat.length && state.chat[i].role === 'bot'; i++) {
+          gone.add(state.chat[i].id)
+        }
+      }
+
+      const res = deleteByMessage(coreOf(state), action.msgId)
+      // วันที่ที่ยอดขายเปลี่ยน ต้องคิดสรุป "รายรับของขาย" ใหม่
+      const touchedDays = [...new Set(state.sales.filter((s) => s.srcMsgId === action.msgId).map((s) => s.date))]
+
+      let chat = state.chat.filter((m) => !gone.has(m.id))
+      for (const d of touchedDays) chat = withDailyIncomeNotice(chat, res.core, d)
+      chat = [
+        ...chat,
+        systemNote(
+          res.removed.length ? `ลบข้อความและถอนข้อมูลออกแล้ว · ${res.removed.join(' · ')}` : 'ลบข้อความแล้ว',
+          target.channel,
+          'ok',
+        ),
+      ]
+
+      return {
+        ...state,
+        ...res.core,
+        chat,
+        snapshots: state.snapshots.filter((s) => !gone.has(s.msgId)),
+      }
+    }
+
     case 'chat/help':
       return {
         ...state,
@@ -303,7 +402,9 @@ function reducer(state: AppState, action: Action): AppState {
       const recipe = state.recipes.find((r) => r.id === action.recipeId)
       if (!recipe) return state
       const before = coreOf(state)
-      const prod = produce(before, recipe, action.produceQty, today())
+      // จองไอดีไว้ก่อน แล้วยกให้ข้อความแรกที่ย้อนกลับได้ — ทุกรายการที่เกิดขึ้นจะผูกกับข้อความนั้น
+      const srcId = uid('m')
+      const prod = produce(before, recipe, action.produceQty, today(), srcId)
       const sold = runCommand(
         prod.core,
         {
@@ -315,8 +416,11 @@ function reducer(state: AppState, action: Action): AppState {
           raw: '',
         },
         today(),
+        srcId,
       )
-      const replies = [...prod.messages, ...sold.messages]
+      const all = [...prod.messages, ...sold.messages]
+      const first = all.findIndex((m) => m.undoable)
+      const replies = all.map((m, i) => (i === first ? { ...m, id: srcId } : m))
       const anchor = replies.find((m) => m.undoable)
       return {
         ...state,
@@ -432,11 +536,7 @@ function reducer(state: AppState, action: Action): AppState {
         ? state.transactions.map((t) => (t.id === action.tx.id ? action.tx : t))
         : [action.tx, ...state.transactions]
       // จำหมวดใหม่ไว้ให้เลือกครั้งหน้า
-      const key = action.tx.kind === 'expense' ? 'expenseCategories' : 'incomeCategories'
-      const known = state.settings[key]
-      const settings = known.includes(action.tx.category)
-        ? state.settings
-        : { ...state.settings, [key]: [...known, action.tx.category] }
+      const settings = rememberCategory(state.settings, action.tx.category, action.tx.kind)
       return { ...state, transactions, settings }
     }
 

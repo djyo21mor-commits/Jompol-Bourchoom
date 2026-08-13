@@ -1,7 +1,8 @@
 import { useRef, useState } from 'react'
-import type { Overhead, Settings } from '../types'
+import type { MoneyCategory, Overhead, Settings } from '../types'
 import { OVERHEAD_LABEL } from '../types'
 import { exportData, parseImport, useStore } from '../lib/store'
+import { uid } from '../lib/engine'
 import { saveTextFile } from '../lib/download'
 import { money, num } from '../lib/format'
 import { suggestPrice } from '../lib/calc'
@@ -201,31 +202,32 @@ export default function SettingsPage() {
 
       <Card
         title="หมวดหมู่รายรับ-รายจ่าย"
-        subtitle="ใช้ในหน้าบัญชี — พิมพ์หมวดใหม่ในแชทได้เลย ระบบจะเพิ่มให้เอง ลบหมวดที่ไม่ใช้ได้ที่นี่"
+        subtitle="ตั้งหมวดเองได้ และกำหนด “คำสั้น” ของแต่ละหมวด เช่น หมวดค่าอาหาร ตั้งคำสั้นว่า กิน — พิมพ์ในแชทว่า กิน 100 ระบบจะลงให้เป็นค่าอาหาร 100 บาททันที"
       >
         {(
           [
-            ['expenseCategories', 'หมวดรายจ่าย'],
-            ['incomeCategories', 'หมวดรายรับ'],
+            ['expense', 'หมวดรายจ่าย'],
+            ['income', 'หมวดรายรับ'],
           ] as const
-        ).map(([key, label]) => (
-          <div key={key} className="mb-4 last:mb-0">
+        ).map(([kind, label]) => (
+          <div key={kind} className="mb-4 last:mb-0">
             <h3 className="mb-2 text-[13px] font-semibold text-ink-2">{label}</h3>
-            <div className="flex flex-wrap gap-2">
-              {draft[key].map((c) => (
-                <span key={c} className="inline-flex items-center gap-1 rounded-lg bg-surface-2 py-1.5 pl-3 pr-1.5 text-[13px]">
-                  {c}
-                  <button
-                    type="button"
-                    aria-label={`ลบหมวด ${c}`}
-                    onClick={() => set(key, draft[key].filter((x) => x !== c))}
-                    className="rounded p-0.5 text-ink-3 hover:bg-surface-3 hover:text-bad-ink"
-                  >
-                    <Icon name="close" className="size-3.5" />
-                  </button>
-                </span>
-              ))}
-              {!draft[key].length && <span className="text-[13px] text-ink-3">ยังไม่มีหมวด</span>}
+            <div className="space-y-2">
+              {draft.categories
+                .filter((c) => c.kind === kind)
+                .map((c) => (
+                  <CategoryRow
+                    key={c.id}
+                    category={c}
+                    onChange={(next) =>
+                      set('categories', draft.categories.map((x) => (x.id === c.id ? next : x)))
+                    }
+                    onRemove={() => set('categories', draft.categories.filter((x) => x.id !== c.id))}
+                  />
+                ))}
+              {!draft.categories.some((c) => c.kind === kind) && (
+                <p className="text-[13px] text-ink-3">ยังไม่มีหมวด</p>
+              )}
             </div>
             <input
               className="field mt-2"
@@ -234,14 +236,19 @@ export default function SettingsPage() {
                 if (e.key !== 'Enter') return
                 e.preventDefault()
                 const value = e.currentTarget.value.trim()
-                if (value && !draft[key].includes(value)) set(key, [...draft[key], value])
+                const dup = draft.categories.some((c) => c.kind === kind && c.name === value)
+                if (value && !dup) {
+                  set('categories', [...draft.categories, { id: uid('c'), name: value, kind, keywords: [] }])
+                }
                 e.currentTarget.value = ''
               }}
             />
           </div>
         ))}
-        <p className="mt-1 text-[12px] text-ink-3">
+        <p className="mt-1 text-[12px] leading-relaxed text-ink-3">
           ลบหมวดแล้วรายการเก่าที่ใช้หมวดนั้นยังอยู่ครบ แค่ไม่ขึ้นเป็นตัวเลือกให้กดอีก
+          <br />
+          อย่าลืมกด “บันทึกการตั้งค่า” ด้านบนหลังแก้เสร็จ
         </p>
       </Card>
 
@@ -302,6 +309,72 @@ export default function SettingsPage() {
         <br />
         ถ้าล้างข้อมูลเบราว์เซอร์หรือเปลี่ยนเครื่อง ให้ใช้ไฟล์สำรองในการย้ายข้อมูล
       </p>
+    </div>
+  )
+}
+
+/** หนึ่งหมวด: แก้ชื่อได้ และใส่คำสั้นได้หลายคำ */
+function CategoryRow({
+  category,
+  onChange,
+  onRemove,
+}: {
+  category: MoneyCategory
+  onChange: (next: MoneyCategory) => void
+  onRemove: () => void
+}) {
+  return (
+    <div className="rounded-xl border border-line bg-surface-2 p-2.5">
+      <div className="flex items-center gap-2">
+        <input
+          className="field h-9 flex-1 !py-1 text-[13.5px] font-semibold"
+          value={category.name}
+          aria-label={`ชื่อหมวด ${category.name}`}
+          onChange={(e) => onChange({ ...category, name: e.target.value })}
+        />
+        <button
+          type="button"
+          aria-label={`ลบหมวด ${category.name}`}
+          onClick={onRemove}
+          className="rounded-lg p-1.5 text-ink-3 hover:bg-surface-3 hover:text-bad-ink"
+        >
+          <Icon name="close" className="size-4" />
+        </button>
+      </div>
+
+      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+        <span className="text-[12px] text-ink-3">คำสั้น:</span>
+        {category.keywords.map((word) => (
+          <span
+            key={word}
+            className="inline-flex items-center gap-0.5 rounded-md bg-surface py-1 pl-2 pr-1 text-[12.5px] text-ink-2"
+          >
+            {word}
+            <button
+              type="button"
+              aria-label={`ลบคำสั้น ${word}`}
+              onClick={() => onChange({ ...category, keywords: category.keywords.filter((k) => k !== word) })}
+              className="rounded p-0.5 text-ink-3 hover:text-bad-ink"
+            >
+              <Icon name="close" className="size-3" />
+            </button>
+          </span>
+        ))}
+        <input
+          className="field h-7 w-28 !px-2 !py-0 text-[12.5px]"
+          placeholder="+ คำสั้น"
+          aria-label={`เพิ่มคำสั้นของหมวด ${category.name}`}
+          onKeyDown={(e) => {
+            if (e.key !== 'Enter') return
+            e.preventDefault()
+            const word = e.currentTarget.value.trim()
+            if (word && !category.keywords.includes(word)) {
+              onChange({ ...category, keywords: [...category.keywords, word] })
+            }
+            e.currentTarget.value = ''
+          }}
+        />
+      </div>
     </div>
   )
 }

@@ -44,6 +44,8 @@ export interface Purchase {
   unitCost: number
   /** ข้อความที่พิมพ์เข้ามาตอนบันทึก (ถ้ามาจากแชท) */
   note?: string
+  /** id ของข้อความในแชทที่ทำให้เกิดรายการนี้ — ใช้ตอนลบย้อนกลับ */
+  srcMsgId?: string
   createdAt: string
 }
 
@@ -105,6 +107,7 @@ export interface Production {
   overheadCost: number
   totalCost: number
   costPerUnit: number
+  srcMsgId?: string
   createdAt: string
 }
 
@@ -125,6 +128,9 @@ export interface Lot {
   /** ต้นทุนเดิมก่อนยกมา — เก็บไว้ดูย้อนหลัง */
   originalCostPerUnit?: number
   carriedOver: boolean
+  /** ล็อตต้นทางที่ถูกตัดมาเป็นของยกมา — ใช้คืนของกลับตอนลบ */
+  fromLotId?: string
+  srcMsgId?: string
   createdAt: string
 }
 
@@ -141,6 +147,7 @@ export interface Sale {
   /** ต้นทุนของสินค้าที่ขายไป (ของยกมา = 0) */
   cost: number
   lotIds: string[]
+  srcMsgId?: string
   createdAt: string
 }
 
@@ -154,7 +161,10 @@ export interface Waste {
   unit: string
   /** มูลค่าต้นทุนที่เสียไป */
   cost: number
+  /** ล็อตที่ถูกตัดไป — ใช้คืนของกลับตอนลบ */
+  lotIds?: string[]
   reason?: string
+  srcMsgId?: string
   createdAt: string
 }
 
@@ -178,7 +188,21 @@ export interface Transaction {
   amount: number
   /** ชื่อคนที่บันทึก — ใช้ตอนทำงานกันสองคน */
   by: string
+  srcMsgId?: string
   createdAt: string
+}
+
+/**
+ * หมวดหมู่รายรับ-รายจ่าย พร้อม "คำสั้น" ที่พิมพ์แล้วเข้าหมวดนี้
+ * เช่น หมวด "ค่าอาหาร" ตั้งคำสั้นเป็น กิน / อาหาร / ข้าว
+ * พิมพ์ "กิน 100" ในแชทก็เข้าหมวดค่าอาหารทันที
+ */
+export interface MoneyCategory {
+  id: string
+  name: string
+  kind: TxKind
+  /** คำสั้นที่ใช้แทนชื่อหมวดตอนพิมพ์ในแชท */
+  keywords: string[]
 }
 
 /**
@@ -198,6 +222,7 @@ export interface Asset {
   /** เงินที่จ่ายไปจริง */
   amount: number
   by: string
+  srcMsgId?: string
   createdAt: string
 }
 
@@ -251,10 +276,8 @@ export interface Settings {
   priceMode: 'markup' | 'margin'
   /** ปัดราคาขายขึ้นเป็นจำนวนเต็มกี่บาท (0 = ไม่ปัด) */
   priceRounding: number
-  /** หมวดหมู่รายจ่ายที่ใช้บ่อย — เพิ่มเองได้ และระบบจะจำหมวดใหม่ที่พิมพ์ในแชทให้ */
-  expenseCategories: string[]
-  /** หมวดหมู่รายรับอื่นที่ไม่ใช่การขายขนม */
-  incomeCategories: string[]
+  /** หมวดหมู่รายรับ-รายจ่ายทั้งหมด พร้อมคำสั้นของแต่ละหมวด */
+  categories: MoneyCategory[]
   /** คนที่ช่วยกันบันทึก เช่น ["สามี", "ภรรยา"] */
   people: string[]
   /** คนที่กำลังบันทึกอยู่ตอนนี้ */

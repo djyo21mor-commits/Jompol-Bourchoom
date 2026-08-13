@@ -97,14 +97,21 @@ describe('บันทึกรายรับ-รายจ่ายลงระ
     const core = run(emptyCore(), DAY2, 'จ่ายค่าวัตถุดิบสำรอง 250 บาท')
     expect(core.transactions).toHaveLength(1)
     expect(core.transactions[0]).toMatchObject({ kind: 'expense', category: 'ค่าวัตถุดิบสำรอง', amount: 250 })
-    expect(core.settings.expenseCategories).toContain('ค่าวัตถุดิบสำรอง')
+    expect(core.settings.categories.map((c) => c.name)).toContain('ค่าวัตถุดิบสำรอง')
   })
 
   it('หมวดที่มีอยู่แล้ว ไม่เพิ่มซ้ำ', () => {
-    const before = DEFAULT_SETTINGS.expenseCategories.length
+    const before = DEFAULT_SETTINGS.categories.length
     const core = run(emptyCore(), DAY2, 'จ่ายค่าไฟ 1200 บาท', 'จ่ายค่าไฟ 900 บาท')
     expect(core.transactions).toHaveLength(2)
-    expect(core.settings.expenseCategories).toHaveLength(before)
+    expect(core.settings.categories).toHaveLength(before)
+  })
+
+  it('พิมพ์คำสั้นของหมวด ให้ลงหมวดเต็มโดยไม่สร้างหมวดใหม่', () => {
+    const before = DEFAULT_SETTINGS.categories.length
+    const core = runCommand(emptyCore(), parseLine('กิน 120', 'money'), DAY2).core
+    expect(core.transactions[0]).toMatchObject({ kind: 'expense', category: 'ค่าอาหาร', amount: 120 })
+    expect(core.settings.categories).toHaveLength(before)
   })
 
   it('ย้อนกลับได้เหมือนคำสั่งอื่น', () => {

@@ -25,7 +25,7 @@ const QUICK: Record<ChatChannel, { label: string; text: string }[]> = {
     { label: 'ค่าอาหาร', text: 'กิน 100' },
     { label: 'ค่าเช่า', text: 'จ่ายค่าเช่าร้าน 5000 บาท' },
     { label: 'เงินเข้า', text: '+ รับจ้างทำเค้ก 800' },
-    { label: 'ทรัพย์สิน', text: 'ซื้อทรัพย์สินทองคำ จำนวน 10000 บาท ที่ราคาบาทละ 65000 บาท' },
+    { label: 'ทรัพย์สิน', text: 'ซื้อทองคำ จำนวน 10000 บาท ที่ราคาบาทละ 65000 บาท' },
   ],
 }
 
@@ -43,6 +43,7 @@ export default function ChatPage({
 }) {
   const { state, dispatch } = useStore()
   const [text, setText] = useState('')
+  const [askDelete, setAskDelete] = useState<string | null>(null)
   const endRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
@@ -137,20 +138,36 @@ export default function ChatPage({
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-3 pt-4">
         <div className="mx-auto flex max-w-2xl flex-col gap-3">
-          {messages.map((m) =>
-            m.role === 'user' ? (
-              <UserBubble key={m.id} message={m} showName={people.length > 1} />
-            ) : (
-              <BotBubble
-                key={m.id}
-                message={m}
-                canUndo={!!m.undoable && undoableIds.has(m.id)}
-                confirmLive={m.id === liveConfirmId}
-                onUndo={() => dispatch({ type: 'chat/undo', msgId: m.id })}
-                onAction={runAction}
-              />
-            ),
-          )}
+          {messages.map((m) => (
+            <div key={m.id} className="flex flex-col gap-1.5">
+              {m.role === 'user' ? (
+                <UserBubble
+                  message={m}
+                  showName={people.length > 1}
+                  onAskDelete={() => setAskDelete(m.id)}
+                />
+              ) : (
+                <BotBubble
+                  message={m}
+                  canUndo={!!m.undoable && undoableIds.has(m.id)}
+                  confirmLive={m.id === liveConfirmId}
+                  onUndo={() => dispatch({ type: 'chat/undo', msgId: m.id })}
+                  onAskDelete={() => setAskDelete(m.id)}
+                  onAction={runAction}
+                />
+              )}
+              {askDelete === m.id && (
+                <DeleteConfirm
+                  isUser={m.role === 'user'}
+                  onCancel={() => setAskDelete(null)}
+                  onConfirm={() => {
+                    dispatch({ type: 'chat/delete', msgId: m.id })
+                    setAskDelete(null)
+                  }}
+                />
+              )}
+            </div>
+          ))}
           <div ref={endRef} />
         </div>
       </div>
@@ -214,12 +231,66 @@ export default function ChatPage({
   )
 }
 
-function UserBubble({ message, showName }: { message: ChatMessage; showName: boolean }) {
+function UserBubble({
+  message,
+  showName,
+  onAskDelete,
+}: {
+  message: ChatMessage
+  showName: boolean
+  onAskDelete: () => void
+}) {
   return (
     <div className="flex flex-col items-end">
       {showName && message.by && <span className="mb-0.5 mr-1 text-[11px] text-ink-3">{message.by}</span>}
-      <div className="max-w-[85%] rounded-2xl rounded-br-md bg-brand px-3.5 py-2.5 text-[14.5px] leading-relaxed text-brand-ink whitespace-pre-wrap">
-        {message.text}
+      <div className="flex max-w-[92%] items-center gap-1">
+        <DeleteButton onClick={onAskDelete} />
+        <div className="rounded-2xl rounded-br-md bg-brand px-3.5 py-2.5 text-[14.5px] leading-relaxed text-brand-ink whitespace-pre-wrap">
+          {message.text}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** ปุ่มลบตัวเล็กข้างฟองแชท กดแล้วค่อยถามยืนยันอีกที */
+function DeleteButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label="ลบข้อความนี้"
+      className="shrink-0 rounded-lg p-1.5 text-ink-3 opacity-60 hover:bg-surface-2 hover:text-bad-ink hover:opacity-100"
+    >
+      <Icon name="trash" className="size-3.5" />
+    </button>
+  )
+}
+
+function DeleteConfirm({
+  isUser,
+  onConfirm,
+  onCancel,
+}: {
+  isUser: boolean
+  onConfirm: () => void
+  onCancel: () => void
+}) {
+  return (
+    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
+      <div className="max-w-[92%] rounded-xl border border-bad/40 bg-bad/8 px-3 py-2.5">
+        <p className="text-[13px] leading-relaxed text-ink">
+          ลบข้อความนี้ พร้อมถอนข้อมูลที่ข้อความนี้บันทึกไว้ออกจากสต็อกและสรุปทั้งหมด?
+        </p>
+        <div className="mt-2 flex gap-2">
+          <button type="button" onClick={onConfirm} className="btn-danger btn-sm">
+            <Icon name="trash" className="size-3.5" />
+            ลบเลย
+          </button>
+          <button type="button" onClick={onCancel} className="btn-ghost btn-sm text-ink-2">
+            ยกเลิก
+          </button>
+        </div>
       </div>
     </div>
   )
@@ -230,6 +301,7 @@ function BotBubble({
   canUndo,
   confirmLive,
   onUndo,
+  onAskDelete,
   onAction,
 }: {
   message: ChatMessage
@@ -237,6 +309,7 @@ function BotBubble({
   /** true เมื่อปุ่มยืนยันสูตรของข้อความนี้ยังกดได้อยู่ */
   confirmLive: boolean
   onUndo: () => void
+  onAskDelete: () => void
   onAction: (a: ChatAction) => void
 }) {
   const tone = TONE_STYLE[message.tone ?? 'info'] ?? TONE_STYLE.info
@@ -244,7 +317,7 @@ function BotBubble({
   // ปุ่มยืนยันของสูตรที่จัดการไปแล้ว ให้ซ่อน เหลือแต่ปุ่มอื่นที่ยังมีความหมาย
   const actions = (message.actions ?? []).filter((a) => !isRecipeAction(a.kind) || confirmLive)
   return (
-    <div className="flex justify-start">
+    <div className="flex items-center justify-start gap-1">
       <div className={`max-w-[92%] rounded-2xl rounded-bl-md border px-3.5 py-3 ${tone.bubble}`}>
         <div className="flex items-start gap-2">
           <Icon name={tone.icon} className={`mt-0.5 size-4 shrink-0 ${tone.iconClass}`} />
@@ -286,6 +359,7 @@ function BotBubble({
 
         <time className="mt-2 block text-[11px] text-ink-3">{timeText(message.at)}</time>
       </div>
+      <DeleteButton onClick={onAskDelete} />
     </div>
   )
 }
