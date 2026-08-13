@@ -2,6 +2,7 @@ import { useRef, useState } from 'react'
 import type { Overhead, Settings } from '../types'
 import { OVERHEAD_LABEL } from '../types'
 import { exportData, parseImport, useStore } from '../lib/store'
+import { saveTextFile } from '../lib/download'
 import { money, num } from '../lib/format'
 import { suggestPrice } from '../lib/calc'
 import { Card, ConfirmButton, Field, Icon, NumberInput, Segmented } from '../components/ui'
@@ -25,18 +26,13 @@ export default function SettingsPage() {
     window.setTimeout(() => setSaved(false), 2200)
   }
 
-  function download() {
-    const blob = new Blob([exportData(state)], { type: 'application/json;charset=utf-8' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `bakery-backup_${new Date().toISOString().slice(0, 10)}.json`
-    // ต้องแปะลง DOM ก่อนกด ไม่งั้นบางเบราว์เซอร์จะไม่สนใจชื่อไฟล์ที่ตั้งไว้
-    a.style.display = 'none'
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    URL.revokeObjectURL(url)
+  async function download() {
+    const res = await saveTextFile(
+      `bakery-backup_${new Date().toISOString().slice(0, 10)}.json`,
+      exportData(state),
+      'application/json',
+    )
+    setImportError(res.ok ? '' : res.message)
   }
 
   async function upload(file: File) {
@@ -253,7 +249,7 @@ export default function SettingsPage() {
 
       <Card title="สำรองข้อมูล" subtitle="ข้อมูลทั้งหมดเก็บอยู่ในเครื่องนี้เท่านั้น ควรดาวน์โหลดเก็บไว้เป็นระยะ">
         <div className="flex flex-wrap gap-2">
-          <button type="button" onClick={download} className="btn-outline">
+          <button type="button" onClick={() => void download()} className="btn-outline">
             <Icon name="download" className="size-4" />
             ดาวน์โหลดไฟล์สำรอง
           </button>

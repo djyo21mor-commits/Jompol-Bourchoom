@@ -2,26 +2,8 @@ import { useMemo, useState } from 'react'
 import { useStore } from '../lib/store'
 import { buildLedger, ledgerToCsv, ledgerToJson, ledgerTotals, type LedgerMode } from '../lib/ledger'
 import { addDays, baht, dateText, num, today, toISODate } from '../lib/format'
+import { copyText, saveTextFile } from '../lib/download'
 import { Card, Chip, Field, Icon, Segmented } from './ui'
-
-/**
- * ดาวน์โหลดข้อความเป็นไฟล์ โดยไม่ต้องมีเซิร์ฟเวอร์
- * ต้องแปะ <a> ลง DOM ก่อนกด ไม่งั้นบางเบราว์เซอร์จะไม่สนใจชื่อไฟล์ที่ตั้งไว้
- * และชื่อไฟล์ต้องเป็นอักษรอังกฤษ เพราะถ้าใส่ภาษาไทย เบราว์เซอร์บางตัวจะทิ้งชื่อทั้งก้อน
- * จนไฟล์ออกมาไม่มีนามสกุล แล้วเปิดใน Excel ไม่ได้
- */
-function downloadText(filename: string, text: string, mime: string) {
-  const blob = new Blob([text], { type: `${mime};charset=utf-8` })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  a.style.display = 'none'
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
-  URL.revokeObjectURL(url)
-}
 
 function monthStart(iso: string): string {
   return `${iso.slice(0, 7)}-01`
@@ -41,6 +23,7 @@ export default function LedgerExport() {
   const [mode, setMode] = useState<LedgerMode>('daily')
   const [includeOverhead, setIncludeOverhead] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [notice, setNotice] = useState('')
 
   const opts = useMemo(() => ({ from, to, mode, includeOverhead }), [from, to, mode, includeOverhead])
   const rows = useMemo(() => buildLedger(state, opts), [state, opts])
@@ -48,13 +31,18 @@ export default function LedgerExport() {
   const stamp = `${from}_${to}`
 
   async function copyCsv() {
-    try {
-      await navigator.clipboard.writeText(ledgerToCsv(rows).replace(/^﻿/, ''))
+    if (await copyText(ledgerToCsv(rows).replace(/^﻿/, ''))) {
       setCopied(true)
+      setNotice('')
       window.setTimeout(() => setCopied(false), 2000)
-    } catch {
-      /* บางเบราว์เซอร์ไม่ให้สิทธิ์คลิปบอร์ด — ผู้ใช้ยังดาวน์โหลดไฟล์ได้ */
+    } else {
+      setNotice('เบราว์เซอร์ไม่ให้คัดลอก ลองใช้ปุ่มดาวน์โหลดแทน')
     }
+  }
+
+  async function download(filename: string, text: string, mime: string) {
+    const res = await saveTextFile(filename, text, mime)
+    setNotice(res.ok ? (res.note ?? '') : res.message)
   }
 
   return (
@@ -157,7 +145,7 @@ export default function LedgerExport() {
         <div className="mt-3 flex flex-wrap gap-2">
           <button
             type="button"
-            onClick={() => downloadText(`bakery-ledger_${stamp}.csv`, ledgerToCsv(rows), 'text/csv')}
+            onClick={() => void download(`bakery-ledger_${stamp}.csv`, ledgerToCsv(rows), 'text/csv')}
             className="btn-primary btn-sm"
           >
             <Icon name="download" className="size-4" />
@@ -165,7 +153,7 @@ export default function LedgerExport() {
           </button>
           <button
             type="button"
-            onClick={() => downloadText(`bakery-ledger_${stamp}.json`, ledgerToJson(rows, opts), 'application/json')}
+            onClick={() => void download(`bakery-ledger_${stamp}.json`, ledgerToJson(rows, opts), 'application/json')}
             className="btn-outline btn-sm"
           >
             <Icon name="download" className="size-4" />
@@ -177,6 +165,8 @@ export default function LedgerExport() {
           </button>
         </div>
       )}
+
+      {notice && <p className="mt-2.5 rounded-xl bg-surface-2 px-3 py-2.5 text-[12.5px] text-ink-2">{notice}</p>}
 
       <details className="mt-3 text-[13px]">
         <summary className="cursor-pointer text-ink-2 hover:text-ink">ดูตัวอย่างข้อมูลก่อนดาวน์โหลด</summary>
