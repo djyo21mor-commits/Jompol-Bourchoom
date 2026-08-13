@@ -1,35 +1,37 @@
 import { useMemo, useState } from 'react'
-import type { Lot, Recipe } from '../types'
 import { useStore } from '../lib/store'
-import { finishedStock, profitAt, recipeCost, sellableLots, suggestPrice } from '../lib/calc'
+import { readDailySheet, type DailySheetRow } from '../lib/engine'
+import { recipeCost, suggestPrice } from '../lib/calc'
 import { addDays, baht, dateText, dayLabel, money, num, today } from '../lib/format'
-import { Card, Chip, ConfirmButton, Empty, Field, Icon, Modal, NumberInput, Stat } from '../components/ui'
+import { Card, Empty, Field, Icon, Modal, NumberInput, Stat } from '../components/ui'
 
+/**
+ * ตารางบันทึกรายวัน — เรียงเมนูทั้งหมดที่ตั้งสูตรไว้
+ * กรอกแค่ "ทำเท่าไหร่" กับ "เหลือเท่าไหร่" ระบบคิด "ขายได้" ให้เอง
+ */
 export default function SalesPage() {
   const { state, dispatch } = useStore()
   const [date, setDate] = useState(today())
-  const [selling, setSelling] = useState<Recipe | null>(null)
-  const [leftover, setLeftover] = useState<Recipe | null>(null)
+  const [editing, setEditing] = useState<DailySheetRow | null>(null)
 
-  const daySales = useMemo(
-    () => state.sales.filter((s) => s.date === date).sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
-    [state.sales, date],
+  const rows = useMemo(() => readDailySheet(state, date), [state, date])
+  const active = rows.filter((r) => r.produced > 0)
+
+  const totals = active.reduce(
+    (acc, r) => ({
+      produced: acc.produced + r.produced,
+      leftover: acc.leftover + r.leftover,
+      sold: acc.sold + r.sold,
+      revenue: acc.revenue + r.revenue,
+      cost: acc.cost + r.cost,
+    }),
+    { produced: 0, leftover: 0, sold: 0, revenue: 0, cost: 0 },
   )
+  const profit = totals.revenue - totals.cost
 
-  const revenue = daySales.reduce((s, x) => s + x.revenue, 0)
-  const cost = daySales.reduce((s, x) => s + x.cost, 0)
-  const qty = daySales.reduce((s, x) => s + x.qty, 0)
-
-  const ready = useMemo(
-    () =>
-      state.recipes
-        .map((r) => ({ recipe: r, lots: sellableLots(state.lots, r.id, date) }))
-        .filter((x) => x.lots.length > 0),
-    [state.recipes, state.lots, date],
-  )
-
-  const pending = useMemo(
-    () => state.lots.filter((l) => l.remaining > 1e-9 && l.sellDate > date),
+  // ของที่ยกมาจากเมื่อวาน ยังขายได้วันนี้
+  const carried = useMemo(
+    () => state.lots.filter((l) => l.remaining > 1e-9 && l.carriedOver && l.sellDate <= date),
     [state.lots, date],
   )
 
@@ -37,8 +39,10 @@ export default function SalesPage() {
     <div className="mx-auto max-w-3xl space-y-4 p-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-[17px] font-bold text-ink">การขาย</h1>
-          <p className="text-[13px] text-ink-3">{dayLabel(date)} · {dateText(date, true)}</p>
+          <h1 className="text-[17px] font-bold text-ink">บันทึกการขายรายวัน</h1>
+          <p className="text-[13px] text-ink-3">
+            {dayLabel(date)} · {dateText(date, true)}
+          </p>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -62,108 +66,90 @@ export default function SalesPage() {
         </div>
       </div>
 
-      <div className="grid grid-cols-3 gap-3">
-        <Stat label="ยอดขาย" value={baht(revenue, 0)} sub="บาท" tone="brand" />
-        <Stat label="กำไรจากการขาย" value={baht(revenue - cost, 0)} sub="บาท" tone={revenue - cost >= 0 ? 'good' : 'bad'} />
-        <Stat label="ขายไปแล้ว" value={num(qty)} sub={`${daySales.length} รายการ`} />
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <Stat label="ทำไป" value={num(totals.produced)} sub="ชิ้น/กล่อง" />
+        <Stat label="ขายได้" value={num(totals.sold)} sub="ทำ − เหลือ" tone="brand" />
+        <Stat label="ยอดขาย" value={baht(totals.revenue, 0)} sub="บาท" tone="good" />
+        <Stat
+          label="กำไรวันนี้"
+          value={baht(profit, 0)}
+          sub="ยอดขาย − ต้นทุนที่ผลิต"
+          tone={profit >= 0 ? 'good' : 'bad'}
+        />
       </div>
 
-      {/* --------------------------- ขนมที่พร้อมขาย --------------------------- */}
-      <Card title="ขนมที่พร้อมขาย" subtitle="กดที่เมนูเพื่อบันทึกการขาย">
-        {!ready.length ? (
-          <Empty
-            icon="box"
-            title="ยังไม่มีขนมพร้อมขาย"
-            hint='บันทึกการผลิตก่อน โดยพิมพ์ในแชทว่า "ทำเค้กมะม่วง 20 กล่อง" หรือกดบันทึกการผลิตในหน้าเมนู'
-          />
-        ) : (
-          <ul className="space-y-2">
-            {ready.map(({ recipe, lots }) => (
-              <ReadyRow
-                key={recipe.id}
-                recipe={recipe}
-                lots={lots}
-                onSell={() => setSelling(recipe)}
-                onLeftover={() => setLeftover(recipe)}
-              />
-            ))}
-          </ul>
-        )}
-
-        {pending.length > 0 && (
-          <div className="mt-3 rounded-xl bg-surface-2 p-3">
-            <h3 className="text-[13px] font-semibold text-ink-2">เตรียมไว้ขายวันถัดไป</h3>
-            <ul className="mt-1.5 space-y-1 text-[13px]">
-              {pending.map((l) => (
-                <li key={l.id} className="flex justify-between gap-3">
-                  <span className="text-ink-2">{l.recipeName}</span>
-                  <span className="tnum text-ink-3">
-                    {num(l.remaining)} {l.unit} · พร้อมขาย{dayLabel(l.sellDate)}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-      </Card>
-
-      {/* ----------------------------- รายการขาย ----------------------------- */}
-      <Card title={`รายการขาย ${dayLabel(date)}`} subtitle={daySales.length ? undefined : 'ยังไม่มีการขายในวันนี้'}>
-        {!daySales.length ? (
-          <Empty icon="cart" title="ยังไม่มีการขาย" hint='พิมพ์ในแชทได้เลย เช่น "ขายเค้กมะม่วง 15 กล่อง กล่องละ 120"' />
-        ) : (
-          <ul className="divide-y divide-line">
-            {daySales.map((sale) => (
-              <li key={sale.id} className="flex items-center gap-3 py-2.5 first:pt-0 last:pb-0">
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-[14.5px] font-medium text-ink">{sale.recipeName}</div>
-                  <div className="text-[12.5px] text-ink-3 tnum">
-                    {num(sale.qty)} {sale.unit} × {baht(sale.unitPrice, 0)} บาท
-                    {sale.cost === 0 && sale.revenue > 0 && ' · ของยกมา ไม่คิดทุนซ้ำ'}
-                  </div>
-                </div>
-                <div className="shrink-0 text-right">
-                  <div className="text-[15px] font-bold tnum text-ink">{baht(sale.revenue, 0)}</div>
-                  <div className={`text-[12px] tnum ${sale.revenue - sale.cost >= 0 ? 'text-good-ink' : 'text-bad-ink'}`}>
-                    กำไร {baht(sale.revenue - sale.cost, 0)}
-                  </div>
-                </div>
-                <ConfirmButton
-                  onConfirm={() => dispatch({ type: 'sale/delete', id: sale.id })}
-                  label="ลบ"
-                  confirmLabel="ยืนยันลบ"
-                  className="btn-ghost btn-sm shrink-0 text-ink-3"
-                />
+      {carried.length > 0 && (
+        <Card title="ของยกมาจากวันก่อน" subtitle="ขายได้เลยวันนี้ ไม่คิดต้นทุนซ้ำ">
+          <ul className="space-y-1.5 text-[13.5px]">
+            {carried.map((l) => (
+              <li key={l.id} className="flex justify-between gap-3">
+                <span className="text-ink-2">{l.recipeName}</span>
+                <span className="tnum text-ink">
+                  {num(l.remaining)} {l.unit} · ผลิต{dayLabel(l.date)}
+                </span>
               </li>
             ))}
           </ul>
-        )}
-      </Card>
-
-      {selling && (
-        <SellDialog
-          recipe={selling}
-          date={date}
-          onClose={() => setSelling(null)}
-          onConfirm={(q, price) => {
-            dispatch({ type: 'sale/add', recipeId: selling.id, qty: q, unitPrice: price, date })
-            setSelling(null)
-          }}
-        />
+        </Card>
       )}
 
-      {leftover && (
-        <LeftoverDialog
-          recipe={leftover}
+      {!state.recipes.length ? (
+        <Card bodyClass="p-0">
+          <Empty
+            icon="book"
+            title="ยังไม่มีเมนู"
+            hint='ไปที่ช่องแชท "ของขาย" แล้วพิมพ์สูตรก่อน เช่น "สูตรเค้กมะม่วง ได้ 20 กล่อง ใช้ มะม่วง 1500 กรัม, กล่อง p39 20 กล่อง" เมนูจะมาโผล่ที่นี่เอง'
+          />
+        </Card>
+      ) : (
+        <Card title="เมนูทั้งหมด" subtitle="กดที่เมนูเพื่อกรอกว่าวันนี้ทำเท่าไหร่ เหลือเท่าไหร่">
+          <ul className="divide-y divide-line">
+            {rows.map((row) => (
+              <li key={row.recipeId}>
+                <button
+                  type="button"
+                  onClick={() => setEditing(row)}
+                  className="-mx-4 flex w-[calc(100%+2rem)] items-center gap-3 px-4 py-3 text-left hover:bg-surface-2"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-[15px] font-semibold text-ink">{row.name}</div>
+                    {row.produced > 0 ? (
+                      <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[12.5px] text-ink-3 tnum">
+                        <span>
+                          ทำ {num(row.produced)} {row.unit}
+                        </span>
+                        <span>เหลือ {num(row.leftover)}</span>
+                        <span className="font-semibold text-ink-2">ขายได้ {num(row.sold)}</span>
+                      </div>
+                    ) : (
+                      <p className="mt-0.5 text-[12.5px] text-ink-3">ยังไม่ได้บันทึกวันนี้</p>
+                    )}
+                  </div>
+                  <div className="shrink-0 text-right">
+                    <div className="text-[15px] font-bold tnum text-ink">{baht(row.revenue, 0)}</div>
+                    {row.produced > 0 && (
+                      <div className={`text-[12px] tnum ${row.profit >= 0 ? 'text-good-ink' : 'text-bad-ink'}`}>
+                        กำไร {baht(row.profit, 0)}
+                      </div>
+                    )}
+                  </div>
+                  <Icon name="chevron" className="size-4 shrink-0 text-ink-3" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
+
+      {editing && (
+        <DailyEditor
+          key={editing.recipeId + date}
+          row={editing}
           date={date}
-          onClose={() => setLeftover(null)}
-          onCarry={(q) => {
-            dispatch({ type: 'lot/carryover', recipeId: leftover.id, qty: q, date })
-            setLeftover(null)
-          }}
-          onWaste={(q, reason) => {
-            dispatch({ type: 'lot/waste', recipeId: leftover.id, qty: q, date, reason })
-            setLeftover(null)
+          onClose={() => setEditing(null)}
+          onSave={(produced, leftover, unitPrice) => {
+            dispatch({ type: 'daily/save', recipeId: editing.recipeId, date, produced, leftover, unitPrice })
+            setEditing(null)
           }}
         />
       )}
@@ -171,124 +157,96 @@ export default function SalesPage() {
   )
 }
 
-function ReadyRow({
-  recipe,
-  lots,
-  onSell,
-  onLeftover,
-}: {
-  recipe: Recipe
-  lots: Lot[]
-  onSell: () => void
-  onLeftover: () => void
-}) {
-  const total = lots.reduce((s, l) => s + l.remaining, 0)
-  const carried = lots.filter((l) => l.carriedOver).reduce((s, l) => s + l.remaining, 0)
-
-  return (
-    <li className="rounded-xl border border-line p-3">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="truncate text-[15px] font-semibold text-ink">{recipe.name}</div>
-          <div className="mt-1 flex flex-wrap gap-1.5">
-            <Chip tone="brand">
-              พร้อมขาย {num(total)} {recipe.yieldUnit}
-            </Chip>
-            {carried > 0 && (
-              <Chip tone="warn">
-                ยกมา {num(carried)} {recipe.yieldUnit} · ทุน 0
-              </Chip>
-            )}
-            {recipe.price > 0 && <Chip>ราคา {baht(recipe.price, 0)} บาท</Chip>}
-          </div>
-        </div>
-      </div>
-      <div className="mt-2.5 flex gap-2">
-        <button type="button" onClick={onSell} className="btn-primary btn-sm flex-1">
-          บันทึกขาย
-        </button>
-        <button type="button" onClick={onLeftover} className="btn-outline btn-sm flex-1">
-          ของเหลือ
-        </button>
-      </div>
-    </li>
-  )
-}
-
-function SellDialog({
-  recipe,
+function DailyEditor({
+  row,
   date,
   onClose,
-  onConfirm,
+  onSave,
 }: {
-  recipe: Recipe
+  row: DailySheetRow
   date: string
   onClose: () => void
-  onConfirm: (qty: number, price: number) => void
+  onSave: (produced: number, leftover: number, unitPrice: number) => void
 }) {
   const { state } = useStore()
-  const available = finishedStock(state.lots, recipe.id, date)
-  const cost = recipeCost(recipe, state.items)
-  const fallback = suggestPrice(
-    cost.costPerUnit,
-    recipe.marginPct || state.settings.defaultMarginPct,
-    state.settings.priceMode,
-    state.settings.priceRounding,
-  ).price
+  const recipe = state.recipes.find((r) => r.id === row.recipeId)!
+  const [produced, setProduced] = useState(row.produced)
+  const [leftover, setLeftover] = useState(row.leftover)
+  const [unitPrice, setUnitPrice] = useState(() => {
+    if (row.unitPrice > 0) return row.unitPrice
+    if (recipe.price > 0) return recipe.price
+    const cost = recipeCost(recipe, state.items)
+    return suggestPrice(cost.costPerUnit, recipe.marginPct || state.settings.defaultMarginPct, state.settings.priceMode, state.settings.priceRounding).price
+  })
 
-  const [qty, setQty] = useState(Math.min(1, available) || 1)
-  const [price, setPrice] = useState(recipe.price > 0 ? recipe.price : fallback)
-
-  const revenue = qty * price
-  const margin = profitAt(price, cost.costPerUnit)
+  const sold = Math.max(0, produced - Math.min(leftover, produced))
+  const scale = recipe.yieldQty > 0 ? produced / recipe.yieldQty : 0
+  const cost = recipeCost(recipe, state.items, scale)
+  const revenue = sold * unitPrice
+  const profit = revenue - cost.totalCost
+  const short = cost.lines.filter((l) => !l.enough)
 
   return (
     <Modal
       open
       onClose={onClose}
-      title={`บันทึกขาย · ${recipe.name}`}
+      title={`${recipe.name} · ${dayLabel(date)}`}
       footer={
-        <button
-          type="button"
-          onClick={() => onConfirm(qty, price)}
-          disabled={qty <= 0 || price <= 0}
-          className="btn-primary w-full"
-        >
-          บันทึกขาย {num(qty)} {recipe.yieldUnit} · {money(revenue)}
+        <button type="button" onClick={() => onSave(produced, leftover, unitPrice)} className="btn-primary w-full">
+          {produced > 0 ? `บันทึก — ขายได้ ${num(sold)} ${recipe.yieldUnit}` : 'ล้างยอดของวันนี้'}
         </button>
       }
     >
       <div className="space-y-4">
         <div className="grid grid-cols-2 gap-3">
-          <Field label="จำนวน" hint={`พร้อมขาย ${num(available)} ${recipe.yieldUnit}`}>
-            <NumberInput value={qty} onChange={setQty} min={0} suffix={recipe.yieldUnit} />
+          <Field label="วันนี้ทำไปเท่าไหร่">
+            <NumberInput value={produced} onChange={setProduced} min={0} suffix={recipe.yieldUnit} />
           </Field>
-          <Field label={`ราคาต่อ${recipe.yieldUnit}`}>
-            <NumberInput value={price} onChange={setPrice} suffix="บาท" />
+          <Field label="เหลือเท่าไหร่" hint="ใส่ 0 ถ้าขายหมด">
+            <NumberInput value={leftover} onChange={setLeftover} min={0} suffix={recipe.yieldUnit} />
           </Field>
         </div>
 
-        <div className="flex flex-wrap gap-2">
-          {[available, 5, 10, 20].filter((v, i, a) => v > 0 && a.indexOf(v) === i).map((v) => (
-            <button key={v} type="button" onClick={() => setQty(v)} className="btn-ghost btn-sm">
-              {num(v)} {recipe.yieldUnit}
-            </button>
-          ))}
+        <div className="rounded-xl bg-brand-soft px-3.5 py-3">
+          <div className="flex items-baseline justify-between gap-3">
+            <span className="text-[13.5px] text-ink-2">ขายได้ (ทำ − เหลือ)</span>
+            <span className="text-[24px] font-bold leading-none tnum text-brand">
+              {num(sold)} <span className="text-[14px] font-semibold">{recipe.yieldUnit}</span>
+            </span>
+          </div>
         </div>
 
-        <div className="grid grid-cols-2 gap-3">
-          <Stat label="ยอดขายรวม" value={baht(revenue, 0)} sub="บาท" tone="brand" />
-          <Stat
-            label="กำไรโดยประมาณ"
-            value={baht(margin.profit * qty, 0)}
-            sub={`${num(margin.markupPct, 0)}% ของทุน`}
-            tone={margin.profit >= 0 ? 'good' : 'bad'}
-          />
-        </div>
+        <Field label={`ราคาขายต่อ${recipe.yieldUnit}`}>
+          <NumberInput value={unitPrice} onChange={setUnitPrice} suffix="บาท" />
+        </Field>
 
-        {qty > available && (
+        <dl className="space-y-1.5 rounded-xl bg-surface-2 p-3 text-[13.5px]">
+          <Row label="ยอดขาย" value={money(revenue)} />
+          <Row label={`ต้นทุนต่อ${recipe.yieldUnit}`} value={money(cost.costPerUnit, 2)} />
+          <Row label="ต้นทุนที่ผลิตวันนี้" value={money(cost.totalCost, 2)} />
+          <div className="flex items-baseline justify-between gap-3 border-t border-line pt-1.5">
+            <dt className="font-semibold text-ink">กำไรวันนี้</dt>
+            <dd className={`text-[16px] font-bold tnum ${profit >= 0 ? 'text-good-ink' : 'text-bad-ink'}`}>
+              {money(profit, 2)}
+            </dd>
+          </div>
+        </dl>
+
+        {leftover > 0 && (
+          <p className="rounded-xl bg-surface-2 px-3 py-2.5 text-[13px] text-ink-2">
+            ของเหลือ {num(Math.min(leftover, produced))} {recipe.yieldUnit} จะยกไปขาย{dayLabel(addDays(date, 1))}{' '}
+            โดยไม่คิดต้นทุนซ้ำ ขายได้เมื่อไหร่เป็นกำไรเต็มจำนวน
+          </p>
+        )}
+
+        {short.length > 0 && produced > 0 && (
           <p className="rounded-xl bg-warn/15 px-3 py-2.5 text-[13px] text-warn-ink">
-            มีของพร้อมขายแค่ {num(available)} {recipe.yieldUnit} — ระบบจะบันทึกเท่าที่มี แล้วเสนอให้บันทึกการผลิตเพิ่ม
+            วัตถุดิบไม่พอ {short.length} รายการ ({short.map((l) => l.name).join(', ')}) — บันทึกได้ แต่สต็อกจะติดลบ
+          </p>
+        )}
+        {cost.unpriced.length > 0 && (
+          <p className="rounded-xl bg-warn/15 px-3 py-2.5 text-[13px] text-warn-ink">
+            ยังไม่รู้ราคาของ {cost.unpriced.join(', ')} — ต้นทุนที่คิดได้ยังไม่ครบ
           </p>
         )}
       </div>
@@ -296,63 +254,11 @@ function SellDialog({
   )
 }
 
-function LeftoverDialog({
-  recipe,
-  date,
-  onClose,
-  onCarry,
-  onWaste,
-}: {
-  recipe: Recipe
-  date: string
-  onClose: () => void
-  onCarry: (qty: number) => void
-  onWaste: (qty: number, reason?: string) => void
-}) {
-  const { state } = useStore()
-  const available = finishedStock(state.lots, recipe.id, date)
-  const [qty, setQty] = useState(available)
-  const [reason, setReason] = useState('')
-
+function Row({ label, value }: { label: string; value: string }) {
   return (
-    <Modal open onClose={onClose} title={`ของเหลือ · ${recipe.name}`}>
-      <div className="space-y-4">
-        <Field label="จำนวนที่เหลือ" hint={`คงเหลือในระบบ ${num(available)} ${recipe.yieldUnit}`}>
-          <NumberInput value={qty} onChange={setQty} min={0} suffix={recipe.yieldUnit} />
-        </Field>
-
-        <div className="rounded-xl border border-line p-3.5">
-          <h3 className="text-[14px] font-semibold text-ink">ยังขายได้ — เก็บไว้ขายวันถัดไป</h3>
-          <p className="mt-1 text-[13px] leading-relaxed text-ink-2">
-            ระบบจะเตรียมไว้ขาย{dayLabel(addDays(date, 1))} โดย<strong className="font-semibold">ไม่คิดต้นทุนซ้ำ</strong>
-            เพราะคิดไปแล้วตอนผลิต เมื่อขายได้จะถือเป็นกำไรเต็มจำนวน
-          </p>
-          <button type="button" onClick={() => onCarry(qty)} disabled={qty <= 0} className="btn-primary btn-sm mt-3 w-full">
-            เก็บไว้ขายวันถัดไป
-          </button>
-        </div>
-
-        <div className="rounded-xl border border-line p-3.5">
-          <h3 className="text-[14px] font-semibold text-ink">ขายไม่ได้แล้ว — ตัดเป็นของเสีย</h3>
-          <p className="mt-1 text-[13px] leading-relaxed text-ink-2">
-            มูลค่าต้นทุนจะถูกบันทึกเป็นความเสียหาย และแสดงในหน้าสรุป
-          </p>
-          <input
-            className="field mt-2.5"
-            placeholder="สาเหตุ (ไม่ใส่ก็ได้) เช่น บูด, ตกแตก"
-            value={reason}
-            onChange={(e) => setReason(e.target.value)}
-          />
-          <button
-            type="button"
-            onClick={() => onWaste(qty, reason.trim() || undefined)}
-            disabled={qty <= 0}
-            className="btn-outline btn-sm mt-2.5 w-full text-bad-ink"
-          >
-            ตัดเป็นของเสีย
-          </button>
-        </div>
-      </div>
-    </Modal>
+    <div className="flex items-baseline justify-between gap-3">
+      <dt className="text-ink-3">{label}</dt>
+      <dd className="tnum font-medium text-ink">{value}</dd>
+    </div>
   )
 }

@@ -1,9 +1,11 @@
 import type {
+  Asset,
   BaseUnit,
   ChatMessage,
   CoreState,
   Item,
   Lot,
+  PendingRecipe,
   Recipe,
   Transaction,
 } from '../types'
@@ -34,11 +36,20 @@ export interface RunResult {
   changed: boolean
 }
 
+/** ข้อความจากบอท — ค่าปกติลงช่องของขาย ระบุ channel เมื่อต้องการส่งไปช่องเงิน */
 function botMsg(
   text: string,
-  opts: Partial<Pick<ChatMessage, 'tone' | 'details' | 'actions' | 'undoable'>> = {},
+  opts: Partial<Pick<ChatMessage, 'tone' | 'details' | 'actions' | 'undoable' | 'channel'>> = {},
 ): ChatMessage {
-  return { id: uid('m'), role: 'bot', text, at: new Date().toISOString(), tone: 'info', ...opts }
+  return {
+    id: uid('m'),
+    channel: 'shop',
+    role: 'bot',
+    text,
+    at: new Date().toISOString(),
+    tone: 'info',
+    ...opts,
+  }
 }
 
 /* --------------------------------------------------------------------------
@@ -173,13 +184,13 @@ function applyPurchase(core: CoreState, cmd: Extract<ParsedCommand, { kind: 'pur
    สร้าง / แก้สูตร
 -------------------------------------------------------------------------- */
 
-function applyRecipe(core: CoreState, cmd: Extract<ParsedCommand, { kind: 'recipe' }>): RunResult {
-  let items = [...core.items]
-  const created: string[] = []
-  const lines: Recipe['lines'] = []
-
+/**
+ * รับสูตรจากแชทแล้ว "ถามยืนยันก่อน" ตามที่ร้านขอ
+ * ยังไม่แตะข้อมูลจริงจนกว่าผู้ใช้จะกดยืนยัน จะได้ทันเห็นว่าอ่านถูกไหมและขาดอะไรบ้าง
+ */
+function askRecipeConfirm(core: CoreState, cmd: Extract<ParsedCommand, { kind: 'recipe' }>): RunResult {
   for (const ing of cmd.ingredients) {
-    let item = findByName(items, ing.name)
+    const item = findByName(core.items, ing.name)
     if (item && item.base !== ing.base) {
       return {
         core,
@@ -191,6 +202,83 @@ function applyRecipe(core: CoreState, cmd: Extract<ParsedCommand, { kind: 'recip
         ],
       }
     }
+  }
+
+  const existing = findByName(core.recipes, cmd.name)
+  const pending: PendingRecipe = {
+    name: existing?.name ?? cmd.name,
+    yieldQty: cmd.yieldQty,
+    yieldUnit: cmd.yieldUnit,
+    isUpdate: !!existing,
+    raw: cmd.raw,
+    ingredients: cmd.ingredients.map((ing) => {
+      const item = findByName(core.items, ing.name)
+      return {
+        name: item?.name ?? ing.name,
+        qty: ing.qty,
+        base: ing.base,
+        unitLabel: ing.unitLabel,
+        known: !!item && (item.avgCost > 0 || item.lastCost > 0),
+      }
+    }),
+  }
+
+  const unknown = pending.ingredients.filter((i) => !i.known)
+  const hasPackaging = pending.ingredients.some((i) => guessCategory(i.name) === 'packaging')
+
+  const messages: ChatMessage[] = [
+    botMsg(`${pending.isUpdate ? 'แก้สูตร' : 'สูตรใหม่'} · ${pending.name} — ถูกต้องแล้วใช่ไหม`, {
+      tone: 'warn',
+      details: [
+        { label: 'ทำ 1 รอบได้', value: `${num(pending.yieldQty)} ${pending.yieldUnit}` },
+        ...pending.ingredients.map((i) => ({
+          label: i.name,
+          value: qtyText(i.qty, i.base, i.unitLabel) + (i.known ? '' : '  ⚠️ ยังไม่รู้ราคา'),
+        })),
+      ],
+      actions: [
+        { kind: 'confirmRecipe', label: 'ถูกต้อง บันทึกเลย' },
+        { kind: 'cancelRecipe', label: 'ยังไม่ใช่ ขอแก้' },
+      ],
+    }),
+  ]
+
+  const missing: string[] = []
+  if (unknown.length) missing.push(`ยังไม่รู้ราคาของ ${unknown.map((i) => i.name).join(', ')}`)
+  if (!hasPackaging) missing.push('ยังไม่ได้ใส่บรรจุภัณฑ์ (กล่อง/ถุง) ในสูตร')
+
+  if (missing.length) {
+    messages.push(
+      botMsg('ตรวจแล้วยังขาดอยู่', {
+        tone: 'warn',
+        details: missing.map((m, i) => ({ label: `ข้อ ${i + 1}`, value: m })),
+      }),
+    )
+    messages.push(
+      botMsg('ถ้ายังไม่ครบ พิมพ์สูตรใหม่ทั้งบรรทัดได้เลย ระบบจะถามยืนยันอีกครั้ง — หรือกดยืนยันไปก่อนแล้วมาเติมทีหลังก็ได้', {
+        tone: 'info',
+      }),
+    )
+  } else {
+    messages.push(botMsg('ตรวจแล้ววัตถุดิบและบรรจุภัณฑ์ครบ ไม่มีอะไรขาด', { tone: 'ok' }))
+  }
+
+  return { core: { ...core, pendingRecipe: pending }, changed: false, messages }
+}
+
+/** ผู้ใช้ยืนยันแล้ว — ลงมือบันทึกสูตรจริงและรายงานต้นทุนต่อกล่องกลับไป */
+export function commitPendingRecipe(core: CoreState): RunResult {
+  const pending = core.pendingRecipe
+  if (!pending) {
+    return { core, changed: false, messages: [botMsg('ไม่มีสูตรที่รอยืนยันอยู่', { tone: 'info' })] }
+  }
+
+  let items = [...core.items]
+  const created: string[] = []
+  const lines: Recipe['lines'] = []
+
+  for (const ing of pending.ingredients) {
+    let item = findByName(items, ing.name)
     if (!item) {
       item = {
         id: uid('i'),
@@ -209,14 +297,14 @@ function applyRecipe(core: CoreState, cmd: Extract<ParsedCommand, { kind: 'recip
     lines.push({ itemId: item.id, qty: ing.qty })
   }
 
-  const existing = findByName(core.recipes, cmd.name)
+  const existing = findByName(core.recipes, pending.name)
   const recipe: Recipe = existing
-    ? { ...existing, yieldQty: cmd.yieldQty, yieldUnit: cmd.yieldUnit, lines }
+    ? { ...existing, yieldQty: pending.yieldQty, yieldUnit: pending.yieldUnit, lines }
     : {
         id: uid('r'),
-        name: cmd.name,
-        yieldQty: cmd.yieldQty,
-        yieldUnit: cmd.yieldUnit,
+        name: pending.name,
+        yieldQty: pending.yieldQty,
+        yieldUnit: pending.yieldUnit,
         lines,
         overhead: { ...core.settings.defaultOverhead },
         marginPct: core.settings.defaultMarginPct,
@@ -225,21 +313,25 @@ function applyRecipe(core: CoreState, cmd: Extract<ParsedCommand, { kind: 'recip
       }
 
   const recipes = existing ? core.recipes.map((r) => (r.id === recipe.id ? recipe : r)) : [...core.recipes, recipe]
-  const nextCore = { ...core, items, recipes }
+  const nextCore = { ...core, items, recipes, pendingRecipe: undefined }
   const cost = recipeCost(recipe, items)
+  const suggestion = suggestPrice(
+    cost.costPerUnit,
+    recipe.marginPct || core.settings.defaultMarginPct,
+    core.settings.priceMode,
+    core.settings.priceRounding,
+  )
 
   const messages: ChatMessage[] = [
-    botMsg(`${existing ? 'แก้สูตรแล้ว' : 'สร้างสูตรใหม่แล้ว'} · ${recipe.name}`, {
+    botMsg(`${existing ? 'แก้สูตรแล้ว' : 'บันทึกสูตรแล้ว'} · ${recipe.name}`, {
       tone: 'ok',
       undoable: true,
       details: [
         { label: 'ทำ 1 รอบได้', value: `${num(recipe.yieldQty)} ${recipe.yieldUnit}` },
-        { label: 'ส่วนผสม', value: `${lines.length} รายการ` },
         { label: `ค่าวัตถุดิบต่อ${recipe.yieldUnit}`, value: money(cost.materialPerUnit, 2) },
-        {
-          label: `ต้นทุนรวมต่อ${recipe.yieldUnit}`,
-          value: `${money(cost.costPerUnit, 2)} (รวมค่าแรง/ค่าน้ำ/ค่าไฟที่ตั้งไว้)`,
-        },
+        { label: `ค่าแรง/น้ำ/ไฟ/จิปาถะต่อ${recipe.yieldUnit}`, value: money(cost.overheadPerUnit, 2) },
+        { label: `ต้นทุนรวมต่อ${recipe.yieldUnit}`, value: money(cost.costPerUnit, 2) },
+        { label: 'ราคาขายที่แนะนำ', value: `${money(suggestion.price)} (กำไร ${num(suggestion.markupPct, 0)}%)` },
       ],
       actions: [{ kind: 'openRecipe', label: 'เปิดตั้งค่าเมนู', recipeId: recipe.id }],
     }),
@@ -248,11 +340,34 @@ function applyRecipe(core: CoreState, cmd: Extract<ParsedCommand, { kind: 'recip
     messages.push(
       botMsg(`เพิ่มวัตถุดิบใหม่ให้ ${created.length} รายการ: ${created.join(', ')}`, {
         tone: 'warn',
-        details: [{ label: 'ยังไม่รู้ราคา', value: 'พิมพ์บันทึกการซื้อของพวกนี้ เพื่อให้คิดต้นทุนได้ครบ' }],
+        details: [{ label: 'ยังไม่รู้ราคา', value: 'พิมพ์บันทึกการซื้อของพวกนี้ ต้นทุนถึงจะครบ' }],
       }),
     )
   }
+  if (cost.unpriced.length) {
+    messages.push(
+      botMsg(`ต้นทุนที่คิดได้ยังไม่ครบ เพราะยังไม่รู้ราคาของ ${cost.unpriced.join(', ')}`, { tone: 'warn' }),
+    )
+  }
+
   return { core: nextCore, messages, changed: true }
+}
+
+/** ผู้ใช้บอกว่ายังไม่ถูก — ทิ้งสูตรที่ค้างไว้ */
+export function cancelPendingRecipe(core: CoreState): RunResult {
+  if (!core.pendingRecipe) {
+    return { core, changed: false, messages: [botMsg('ไม่มีสูตรที่รอยืนยันอยู่', { tone: 'info' })] }
+  }
+  return {
+    core: { ...core, pendingRecipe: undefined },
+    changed: false,
+    messages: [
+      botMsg('ยกเลิกสูตรนี้แล้ว พิมพ์สูตรใหม่ได้เลย', {
+        tone: 'info',
+        details: [{ label: 'ตัวอย่าง', value: 'สูตรเค้กมะม่วง ได้ 20 กล่อง ใช้ มะม่วง 1500 กรัม, กล่อง p39 20 กล่อง' }],
+      }),
+    ],
+  }
 }
 
 /* --------------------------------------------------------------------------
@@ -760,6 +875,7 @@ function applyMoney(
     category,
     detail: cmd.detail,
     amount: cmd.amount,
+    by: core.settings.currentPerson,
     createdAt: new Date().toISOString(),
   }
 
@@ -784,6 +900,72 @@ function applyMoney(
     changed: true,
     messages: [
       botMsg(`บันทึก${isExpense ? 'รายจ่าย' : 'รายรับ'}แล้ว · ${category}`, {
+        channel: 'money',
+        tone: 'ok',
+        undoable: true,
+        details,
+      }),
+    ],
+  }
+}
+
+
+/* --------------------------------------------------------------------------
+   ทรัพย์สิน
+-------------------------------------------------------------------------- */
+
+function applyAsset(core: CoreState, cmd: Extract<ParsedCommand, { kind: 'asset' }>, date: string): RunResult {
+  const by = core.settings.currentPerson
+  const unitLabel = cmd.unitLabel ?? ''
+  // ปริมาณที่ได้ = เงินที่จ่าย ÷ ราคาต่อหน่วย เช่น จ่าย 10,000 ทองบาทละ 65,000 -> ได้ 0.1538 บาท
+  const qty = cmd.unitPrice && cmd.unitPrice > 0 ? cmd.amount / cmd.unitPrice : 0
+
+  const asset: Asset = {
+    id: uid('a'),
+    date,
+    name: cmd.name,
+    qty,
+    unitLabel,
+    unitPrice: cmd.unitPrice ?? 0,
+    amount: cmd.amount,
+    by,
+    createdAt: new Date().toISOString(),
+  }
+
+  // เงินที่จ่ายซื้อทรัพย์สินก็คือเงินที่ออกจากกระเป๋า จึงลงเป็นรายจ่ายด้วย
+  const tx: Transaction = {
+    id: uid('t'),
+    date,
+    kind: 'expense',
+    category: 'ซื้อทรัพย์สิน',
+    detail: cmd.name,
+    amount: cmd.amount,
+    by,
+    createdAt: new Date().toISOString(),
+  }
+
+  const known = core.settings.expenseCategories
+  const settings = known.includes('ซื้อทรัพย์สิน')
+    ? core.settings
+    : { ...core.settings, expenseCategories: [...known, 'ซื้อทรัพย์สิน'] }
+
+  const details = [
+    { label: 'เงินที่จ่าย', value: money(cmd.amount) },
+    ...(cmd.unitPrice
+      ? [
+          { label: 'ราคาต่อหน่วย', value: `${money(cmd.unitPrice)} ต่อ ${unitLabel || 'หน่วย'}` },
+          { label: 'ได้มา', value: `${num(qty, 4)} ${unitLabel || 'หน่วย'}` },
+        ]
+      : [{ label: 'ปริมาณ', value: 'ไม่ได้ระบุราคาต่อหน่วย จึงยังไม่รู้ว่าได้มาเท่าไหร่' }]),
+    { label: 'บันทึกเป็น', value: 'รายจ่ายหมวด "ซื้อทรัพย์สิน" ด้วย เพราะเงินออกจากกระเป๋าจริง' },
+  ]
+
+  return {
+    core: { ...core, assets: [asset, ...core.assets], transactions: [tx, ...core.transactions], settings },
+    changed: true,
+    messages: [
+      botMsg(`บันทึกทรัพย์สินแล้ว · ${cmd.name}`, {
+        channel: 'money',
         tone: 'ok',
         undoable: true,
         details,
@@ -902,6 +1084,212 @@ export function helpMessages(): ChatMessage[] {
   ]
 }
 
+
+/* --------------------------------------------------------------------------
+   ตารางบันทึกรายวัน — ทำเท่าไหร่ เหลือเท่าไหร่ ขายได้เท่าไหร่
+   ขายได้ = ทำ − เหลือ  ระบบคิดให้เอง ไม่ต้องกรอกซ้ำ
+-------------------------------------------------------------------------- */
+
+export interface DailySheetInput {
+  recipeId: string
+  date: string
+  produced: number
+  leftover: number
+  unitPrice: number
+}
+
+/** ยอดของเมนูหนึ่งในวันหนึ่ง อ่านกลับจากข้อมูลจริงที่บันทึกไว้ */
+export interface DailySheetRow {
+  recipeId: string
+  name: string
+  unit: string
+  produced: number
+  leftover: number
+  sold: number
+  unitPrice: number
+  revenue: number
+  cost: number
+  profit: number
+}
+
+/** คืนสต็อกวัตถุดิบที่เคยตัดไปของวัน+เมนูนั้น เพื่อให้บันทึกทับได้โดยตัวเลขไม่บวม */
+function rollbackDay(core: CoreState, recipeId: string, date: string): CoreState {
+  const stale = core.productions.filter((p) => p.recipeId === recipeId && p.date === date)
+  if (!stale.length && !core.sales.some((x) => x.recipeId === recipeId && x.date === date)) return core
+
+  const restore = new Map<string, number>()
+  for (const prod of stale) {
+    for (const u of prod.used) restore.set(u.itemId, (restore.get(u.itemId) ?? 0) + u.qty)
+  }
+
+  return {
+    ...core,
+    items: core.items.map((i) => (restore.has(i.id) ? { ...i, stock: i.stock + restore.get(i.id)! } : i)),
+    productions: core.productions.filter((p) => !(p.recipeId === recipeId && p.date === date)),
+    sales: core.sales.filter((x) => !(x.recipeId === recipeId && x.date === date)),
+    lots: core.lots.filter((l) => !(l.recipeId === recipeId && l.date === date)),
+  }
+}
+
+/**
+ * บันทึกยอดของวัน — เขียนทับของเดิมได้เรื่อยๆ (แก้ตัวเลขกี่รอบก็ไม่ซ้ำซ้อน)
+ * ของที่เหลือจะกลายเป็นล็อตยกไปขายวันถัดไปโดยไม่คิดต้นทุนซ้ำ
+ */
+export function recordDailySheet(core: CoreState, input: DailySheetInput): RunResult {
+  const recipe = core.recipes.find((r) => r.id === input.recipeId)
+  if (!recipe) return { core, changed: false, messages: [botMsg('ไม่เจอเมนูนี้', { tone: 'error' })] }
+
+  const produced = Math.max(0, input.produced)
+  const leftover = Math.min(Math.max(0, input.leftover), produced)
+  const sold = produced - leftover
+
+  let next = rollbackDay(core, recipe.id, input.date)
+  if (produced <= 0) {
+    return {
+      core: next,
+      changed: true,
+      messages: [botMsg(`ล้างยอดของ ${recipe.name} วัน${dayLabel(input.date)} แล้ว`, { tone: 'info' })],
+    }
+  }
+
+  // ผลิต: ตัดสต็อกวัตถุดิบและคิดต้นทุน
+  const prodResult = produce(next, recipe, produced, input.date)
+  next = prodResult.core
+  const production = next.productions[0]
+  const lot = next.lots.find((l) => l.recipeId === recipe.id && l.date === input.date)!
+
+  const unitPrice = input.unitPrice > 0 ? input.unitPrice : recipe.price
+  let saleCost = 0
+
+  if (sold > 0) {
+    saleCost = sold * lot.costPerUnit
+    next = {
+      ...next,
+      lots: next.lots.map((l) => (l.id === lot.id ? { ...l, remaining: l.remaining - sold } : l)),
+      sales: [
+        {
+          id: uid('s'),
+          date: input.date,
+          recipeId: recipe.id,
+          recipeName: recipe.name,
+          qty: sold,
+          unit: recipe.yieldUnit,
+          unitPrice,
+          revenue: sold * unitPrice,
+          cost: saleCost,
+          lotIds: [lot.id],
+          createdAt: new Date().toISOString(),
+        },
+        ...next.sales,
+      ],
+    }
+  }
+
+  // ที่เหลือ ยกไปขายวันถัดไป ต้นทุนคิดไปแล้ววันนี้จึงเป็น 0
+  if (leftover > 0) {
+    next = {
+      ...next,
+      lots: next.lots.map((l) =>
+        l.id === lot.id
+          ? { ...l, remaining: 0 }
+          : l,
+      ),
+    }
+    next = {
+      ...next,
+      lots: [
+        {
+          id: uid('l'),
+          recipeId: recipe.id,
+          recipeName: recipe.name,
+          unit: recipe.yieldUnit,
+          date: input.date,
+          sellDate: addDays(input.date, 1),
+          qty: leftover,
+          remaining: leftover,
+          costPerUnit: 0,
+          originalCostPerUnit: lot.costPerUnit,
+          carriedOver: true,
+          createdAt: new Date().toISOString(),
+        },
+        ...next.lots,
+      ],
+    }
+  }
+
+  const revenue = sold * unitPrice
+  const details = [
+    { label: 'ทำไป', value: `${num(produced)} ${recipe.yieldUnit}` },
+    { label: 'เหลือ', value: `${num(leftover)} ${recipe.yieldUnit}` },
+    { label: 'ขายได้ (ทำ − เหลือ)', value: `${num(sold)} ${recipe.yieldUnit}` },
+    { label: 'ราคาต่อหน่วย', value: money(unitPrice) },
+    { label: 'ยอดขาย', value: money(revenue) },
+    { label: `ต้นทุนต่อ${recipe.yieldUnit}`, value: money(production.costPerUnit, 2) },
+    { label: 'ต้นทุนที่ผลิตวันนี้', value: money(production.totalCost, 2) },
+    { label: 'กำไรวันนี้', value: money(revenue - production.totalCost, 2) },
+  ]
+  if (leftover > 0) {
+    details.push({ label: 'ของเหลือ', value: `ยกไปขาย${dayLabel(addDays(input.date, 1))} ไม่คิดต้นทุนซ้ำ` })
+  }
+
+  return {
+    core: next,
+    changed: true,
+    messages: [
+      botMsg(`บันทึกยอดวัน${dayLabel(input.date)} · ${recipe.name}`, { tone: 'ok', details }),
+    ],
+  }
+}
+
+/** อ่านยอดของทุกเมนูในวันที่กำหนด สำหรับแสดงเป็นตาราง */
+export function readDailySheet(core: CoreState, date: string): DailySheetRow[] {
+  return core.recipes.map((recipe) => {
+    const production = core.productions.find((p) => p.recipeId === recipe.id && p.date === date)
+    const sale = core.sales.find((x) => x.recipeId === recipe.id && x.date === date)
+    const carried = core.lots.find((l) => l.recipeId === recipe.id && l.date === date && l.carriedOver)
+    const produced = production?.qty ?? 0
+    const leftover = carried?.qty ?? 0
+    const sold = sale?.qty ?? Math.max(0, produced - leftover)
+    const unitPrice = sale?.unitPrice ?? recipe.price
+    const revenue = sale?.revenue ?? sold * unitPrice
+    const cost = production?.totalCost ?? 0
+    return {
+      recipeId: recipe.id,
+      name: recipe.name,
+      unit: recipe.yieldUnit,
+      produced,
+      leftover,
+      sold,
+      unitPrice,
+      revenue,
+      cost,
+      profit: revenue - cost,
+    }
+  })
+}
+
+/** ข้อความช่วยเหลือของช่องรายรับ-รายจ่าย */
+export function moneyHelpMessages(): ChatMessage[] {
+  return [
+    botMsg('พิมพ์สั้นๆ ได้เลย ระบบเดาให้ว่าเป็นรายจ่าย', {
+      channel: 'money',
+      tone: 'info',
+      details: [
+        { label: 'แบบสั้นที่สุด', value: 'ลูก 100  →  รายจ่ายหมวด "ลูก" 100 บาท' },
+        { label: 'ค่าอาหาร', value: 'กิน 100' },
+        { label: 'ใส่คำว่าจ่ายก็ได้', value: 'จ่ายค่าเช่าร้าน 5000 บาท' },
+        { label: 'เงินเข้า ใส่ + นำหน้า', value: '+ รับจ้างทำเค้ก 800' },
+        { label: 'หรือพิมพ์เต็ม', value: 'รับเงินค่าจ้างทำเค้ก 800 บาท' },
+        { label: 'ทรัพย์สิน', value: 'ซื้อทรัพย์สินทองคำ จำนวน 10000 บาท ที่ราคาบาทละ 65000 บาท' },
+      ],
+    }),
+    botMsg('ค่าซื้อของสำหรับขาย ระบบดึงมาจากช่องของขายให้เองแล้ว ไม่ต้องพิมพ์ซ้ำที่นี่', {
+      channel: 'money',
+      tone: 'info',
+    }),
+  ]
+}
+
 /* --------------------------------------------------------------------------
    ตัวสั่งงานหลัก
 -------------------------------------------------------------------------- */
@@ -911,7 +1299,7 @@ export function runCommand(core: CoreState, cmd: ParsedCommand, date = today()):
     case 'purchase':
       return applyPurchase(core, cmd, date)
     case 'recipe':
-      return applyRecipe(core, cmd)
+      return askRecipeConfirm(core, cmd)
     case 'produce':
       return applyProduce(core, cmd, date)
     case 'sell':
@@ -925,6 +1313,10 @@ export function runCommand(core: CoreState, cmd: ParsedCommand, date = today()):
     case 'expense':
     case 'income':
       return applyMoney(core, cmd, date)
+    case 'asset':
+      return applyAsset(core, cmd, date)
+    case 'confirm':
+      return cmd.yes ? commitPendingRecipe(core) : cancelPendingRecipe(core)
     case 'stock':
       return { core, changed: false, messages: answerStock(core, cmd) }
     case 'cost':

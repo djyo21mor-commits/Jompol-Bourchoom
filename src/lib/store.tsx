@@ -1,7 +1,16 @@
 import { createContext, useContext, useEffect, useMemo, useReducer, type ReactNode } from 'react'
-import type { AppState, ChatMessage, CoreState, Item, Recipe, Settings, Transaction } from '../types'
+import type { AppState, ChatChannel, ChatMessage, CoreState, Item, Recipe, Settings, Transaction } from '../types'
 import { parseScript } from './parser'
-import { helpMessages, produce, runCommand, uid } from './engine'
+import {
+  cancelPendingRecipe,
+  commitPendingRecipe,
+  helpMessages,
+  moneyHelpMessages,
+  produce,
+  recordDailySheet,
+  runCommand,
+  uid,
+} from './engine'
 import { today } from './format'
 
 const STORAGE_KEY = 'jompol-bakery/v1'
@@ -18,6 +27,8 @@ export const DEFAULT_SETTINGS: Settings = {
     'ค่าเดินทาง', 'ค่าโทรศัพท์/เน็ต', 'ค่าอุปกรณ์', 'ค่าการตลาด', 'ค่าธรรมเนียม',
   ],
   incomeCategories: ['รับจ้างทำขนม', 'ขายของอื่น', 'เงินทุนเพิ่ม', 'รายได้อื่น'],
+  people: ['ฉัน'],
+  currentPerson: 'ฉัน',
   theme: 'system',
 }
 
@@ -31,20 +42,32 @@ function emptyCore(): CoreState {
     sales: [],
     wastes: [],
     transactions: [],
+    assets: [],
     settings: { ...DEFAULT_SETTINGS },
   }
 }
 
 function welcomeChat(): ChatMessage[] {
+  const at = new Date().toISOString()
   return [
     {
       id: uid('m'),
+      channel: 'shop',
       role: 'bot',
-      at: new Date().toISOString(),
+      at,
       tone: 'info',
-      text: 'สวัสดีค่ะ พิมพ์บอกได้เลยว่าไปซื้ออะไรมา ทำขนมอะไร หรือขายไปเท่าไหร่',
+      text: 'ช่องนี้ไว้คุยเรื่องของขาย — ซื้อวัตถุดิบ ตั้งสูตร ทำขนม',
     },
     ...helpMessages(),
+    {
+      id: uid('m'),
+      channel: 'money',
+      role: 'bot',
+      at,
+      tone: 'info',
+      text: 'ช่องนี้ไว้จดรายรับ-รายจ่าย พิมพ์สั้นๆ ได้เลย',
+    },
+    ...moneyHelpMessages(),
   ]
 }
 
@@ -57,8 +80,9 @@ function initialState(): AppState {
 -------------------------------------------------------------------------- */
 
 function coreOf(state: AppState): CoreState {
-  const { items, purchases, recipes, productions, lots, sales, wastes, transactions, settings } = state
-  return { items, purchases, recipes, productions, lots, sales, wastes, transactions, settings }
+  const { items, purchases, recipes, productions, lots, sales, wastes, transactions, assets, pendingRecipe, settings } =
+    state
+  return { items, purchases, recipes, productions, lots, sales, wastes, transactions, assets, pendingRecipe, settings }
 }
 
 function load(): AppState {
@@ -97,10 +121,15 @@ function save(state: AppState) {
 -------------------------------------------------------------------------- */
 
 export type Action =
-  | { type: 'chat/send'; text: string }
+  | { type: 'chat/send'; text: string; channel: ChatChannel }
   | { type: 'chat/undo'; msgId: string }
-  | { type: 'chat/clear' }
-  | { type: 'chat/help' }
+  | { type: 'chat/clear'; channel: ChatChannel }
+  | { type: 'chat/help'; channel: ChatChannel }
+  | { type: 'recipe/confirm' }
+  | { type: 'recipe/cancel' }
+  | { type: 'daily/save'; recipeId: string; date: string; produced: number; leftover: number; unitPrice: number }
+  | { type: 'asset/delete'; id: string }
+  | { type: 'person/switch'; name: string }
   | { type: 'chat/produceThenSell'; recipeId: string; produceQty: number; sellQty: number; unitPrice: number }
   | { type: 'item/save'; item: Item }
   | { type: 'item/delete'; id: string }
@@ -122,12 +151,12 @@ function pushSnapshot(state: AppState, core: CoreState, msgId: string): AppState
   return [...state.snapshots, { msgId, core }].slice(-MAX_SNAPSHOTS)
 }
 
-function userMessage(text: string): ChatMessage {
-  return { id: uid('m'), role: 'user', text, at: new Date().toISOString() }
+function userMessage(text: string, channel: ChatChannel, by: string): ChatMessage {
+  return { id: uid('m'), channel, role: 'user', by, text, at: new Date().toISOString() }
 }
 
-function systemNote(text: string, tone: ChatMessage['tone'] = 'info'): ChatMessage {
-  return { id: uid('m'), role: 'bot', text, tone, at: new Date().toISOString() }
+function systemNote(text: string, channel: ChatChannel, tone: ChatMessage['tone'] = 'info'): ChatMessage {
+  return { id: uid('m'), channel, role: 'bot', text, tone, at: new Date().toISOString() }
 }
 
 function reducer(state: AppState, action: Action): AppState {
@@ -140,18 +169,79 @@ function reducer(state: AppState, action: Action): AppState {
       const replies: ChatMessage[] = []
       let changed = false
 
-      for (const cmd of parseScript(text)) {
+      for (const cmd of parseScript(text, action.channel)) {
         const res = runCommand(core, cmd, today())
         core = res.core
         changed = changed || res.changed
-        replies.push(...res.messages)
+        // ข้อความที่ไม่ได้ระบุช่องไว้เอง ให้ตอบกลับในช่องที่ผู้ใช้พิมพ์มา
+        replies.push(...res.messages.map((m) => (m.channel === 'shop' ? { ...m, channel: action.channel } : m)))
+
+        // ซื้อของเข้าร้าน = เงินออกจริง จึงแจ้งเตือนไปที่ช่องรายรับ-รายจ่ายด้วย
+        if (cmd.kind === 'purchase' && res.changed) {
+          replies.push({
+            id: uid('m'),
+            channel: 'money',
+            role: 'bot',
+            at: new Date().toISOString(),
+            tone: 'info',
+            text: `ค่าของขาย · ${cmd.name}`,
+            details: [
+              { label: 'จำนวนเงิน', value: `${cmd.total.toLocaleString('th-TH')} บาท` },
+              { label: 'มาจาก', value: 'ช่องของขาย — นับเป็นรายจ่ายให้แล้ว ไม่ต้องบันทึกซ้ำ' },
+            ],
+          })
+        }
       }
 
       // ผูกปุ่มย้อนกลับไว้กับข้อความแรกที่ทำให้ข้อมูลเปลี่ยน
       const anchor = replies.find((m) => m.undoable)
       const snapshots = changed && anchor ? pushSnapshot(state, before, anchor.id) : state.snapshots
 
-      return { ...state, ...core, chat: [...state.chat, userMessage(text), ...replies], snapshots }
+      return {
+        ...state,
+        ...core,
+        chat: [...state.chat, userMessage(text, action.channel, state.settings.currentPerson), ...replies],
+        snapshots,
+      }
+    }
+
+    case 'recipe/confirm':
+    case 'recipe/cancel': {
+      const before = coreOf(state)
+      const res = action.type === 'recipe/confirm' ? commitPendingRecipe(before) : cancelPendingRecipe(before)
+      const anchor = res.messages.find((m) => m.undoable)
+      return {
+        ...state,
+        ...res.core,
+        chat: [...state.chat, ...res.messages],
+        snapshots: res.changed && anchor ? pushSnapshot(state, before, anchor.id) : state.snapshots,
+      }
+    }
+
+    case 'daily/save': {
+      const res = recordDailySheet(coreOf(state), action)
+      return { ...state, ...res.core, chat: [...state.chat, ...res.messages] }
+    }
+
+    case 'asset/delete': {
+      const asset = state.assets.find((a) => a.id === action.id)
+      if (!asset) return state
+      // ลบทรัพย์สินแล้วต้องลบรายจ่ายที่คู่กันด้วย ไม่งั้นเงินจะหายไปข้างเดียว
+      const txIndex = state.transactions.findIndex(
+        (t) => t.category === 'ซื้อทรัพย์สิน' && t.detail === asset.name && t.date === asset.date && t.amount === asset.amount,
+      )
+      return {
+        ...state,
+        assets: state.assets.filter((a) => a.id !== action.id),
+        transactions: txIndex < 0 ? state.transactions : state.transactions.filter((_, i) => i !== txIndex),
+      }
+    }
+
+    case 'person/switch': {
+      const people = state.settings.people.includes(action.name)
+        ? state.settings.people
+        : [...state.settings.people, action.name]
+      return { ...state, settings: { ...state.settings, people, currentPerson: action.name } }
     }
 
     case 'chat/undo': {
@@ -160,16 +250,33 @@ function reducer(state: AppState, action: Action): AppState {
       return {
         ...state,
         ...snap.core,
-        chat: [...state.chat.map((m) => (m.id === action.msgId ? { ...m, undoable: false } : m)), systemNote('ย้อนกลับรายการล่าสุดแล้ว', 'ok')],
+        chat: [
+          ...state.chat.map((m) => (m.id === action.msgId ? { ...m, undoable: false } : m)),
+          systemNote('ย้อนกลับรายการล่าสุดแล้ว', state.chat.find((m) => m.id === action.msgId)?.channel ?? 'shop', 'ok'),
+        ],
         snapshots: state.snapshots.filter((s) => s.msgId !== action.msgId),
       }
     }
 
     case 'chat/help':
-      return { ...state, chat: [...state.chat, ...helpMessages()] }
+      return {
+        ...state,
+        chat: [
+          ...state.chat,
+          ...(action.channel === 'money' ? moneyHelpMessages() : helpMessages()),
+        ],
+      }
 
     case 'chat/clear':
-      return { ...state, chat: welcomeChat(), snapshots: [] }
+      // ล้างเฉพาะช่องที่เปิดอยู่ อีกช่องยังอยู่ครบ
+      return {
+        ...state,
+        chat: [
+          ...state.chat.filter((m) => m.channel !== action.channel),
+          ...welcomeChat().filter((m) => m.channel === action.channel),
+        ],
+        snapshots: [],
+      }
 
     case 'chat/produceThenSell': {
       const recipe = state.recipes.find((r) => r.id === action.recipeId)
@@ -315,7 +422,7 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, settings: action.settings }
 
     case 'data/replace':
-      return { ...action.state, chat: [...action.state.chat, systemNote('นำเข้าข้อมูลสำเร็จ', 'ok')] }
+      return { ...action.state, chat: [...action.state.chat, systemNote('นำเข้าข้อมูลสำเร็จ', 'shop', 'ok')] }
 
     case 'data/reset':
       return initialState()

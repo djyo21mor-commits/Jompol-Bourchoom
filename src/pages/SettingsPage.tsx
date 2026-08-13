@@ -164,6 +164,46 @@ export default function SettingsPage() {
       </div>
 
       <Card
+        title="คนที่ช่วยกันบันทึก"
+        subtitle="ใส่ชื่อทั้งสองคนไว้ แล้วสลับได้จากด้านบนของช่องแชท ทุกข้อความจะจดว่าใครเป็นคนพิมพ์"
+      >
+        <div className="flex flex-wrap gap-2">
+          {draft.people.map((person) => (
+            <span key={person} className="inline-flex items-center gap-1 rounded-lg bg-surface-2 py-1.5 pl-3 pr-1.5 text-[13px]">
+              {person}
+              {draft.people.length > 1 && (
+                <button
+                  type="button"
+                  aria-label={`ลบ ${person}`}
+                  onClick={() =>
+                    set('people', draft.people.filter((x) => x !== person))
+                  }
+                  className="rounded p-0.5 text-ink-3 hover:bg-surface-3 hover:text-bad-ink"
+                >
+                  <Icon name="close" className="size-3.5" />
+                </button>
+              )}
+            </span>
+          ))}
+        </div>
+        <input
+          className="field mt-2"
+          placeholder="เพิ่มชื่อคน แล้วกด Enter เช่น ภรรยา"
+          onKeyDown={(e) => {
+            if (e.key !== 'Enter') return
+            e.preventDefault()
+            const value = e.currentTarget.value.trim()
+            if (value && !draft.people.includes(value)) set('people', [...draft.people, value])
+            e.currentTarget.value = ''
+          }}
+        />
+        <p className="mt-2 rounded-xl bg-surface-2 px-3 py-2.5 text-[12.5px] leading-relaxed text-ink-2">
+          ข้อมูลเก็บอยู่ในเครื่องนี้เครื่องเดียว ถ้าใช้คนละมือถือจะยังไม่เห็นข้อมูลของกันและกัน —
+          ให้ใช้เครื่องเดียวกัน หรือส่งไฟล์สำรองให้กันในหน้าถัดไป
+        </p>
+      </Card>
+
+      <Card
         title="หมวดหมู่รายรับ-รายจ่าย"
         subtitle="ใช้ในหน้าบัญชี — พิมพ์หมวดใหม่ในแชทได้เลย ระบบจะเพิ่มให้เอง ลบหมวดที่ไม่ใช้ได้ที่นี่"
       >

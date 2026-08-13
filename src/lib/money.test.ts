@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { AppState, CoreState } from '../types'
-import { runCommand } from './engine'
+import { commitPendingRecipe, runCommand } from './engine'
 import { parseLine } from './parser'
 import { buildLedger, ledgerTotals } from './ledger'
 import { buildMoneyEntries, groupByDay, monthLabel, monthRange, shiftMonth, summarizeMoney } from './money'
@@ -19,13 +19,18 @@ function emptyCore(): CoreState {
     sales: [],
     wastes: [],
     transactions: [],
+    assets: [],
     settings: { ...DEFAULT_SETTINGS },
   }
 }
 
 function run(core: CoreState, date: string, ...lines: string[]): CoreState {
   let next = core
-  for (const line of lines) next = runCommand(next, parseLine(line), date).core
+  for (const line of lines) {
+    next = runCommand(next, parseLine(line), date).core
+    // สูตรต้องกดยืนยันก่อนถึงบันทึกจริง — ในเทสต์ยืนยันให้อัตโนมัติ
+    if (next.pendingRecipe) next = commitPendingRecipe(next).core
+  }
   return next
 }
 

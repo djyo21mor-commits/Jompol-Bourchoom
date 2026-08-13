@@ -13,7 +13,7 @@ import {
   SOURCE_LABEL,
   type MoneyEntry,
 } from '../lib/money'
-import { baht, dayLabel, money, num, today } from '../lib/format'
+import { baht, dateText, dayLabel, money, num, today } from '../lib/format'
 import { RankBars } from '../components/Charts'
 import { Card, Chip, ConfirmButton, Empty, Field, Icon, Modal, NumberInput, Segmented, Stat } from '../components/ui'
 
@@ -37,6 +37,12 @@ export default function MoneyPage() {
   )
   const days = useMemo(() => groupByDay(visible), [visible])
 
+  const monthAssets = useMemo(
+    () => state.assets.filter((a) => a.date >= from && a.date <= to).sort((a, b) => b.date.localeCompare(a.date)),
+    [state.assets, from, to],
+  )
+  const allAssetValue = useMemo(() => state.assets.reduce((sum, a) => sum + a.amount, 0), [state.assets])
+
   function newTx(kind: TxKind) {
     setEditing({
       id: uid('t'),
@@ -45,6 +51,7 @@ export default function MoneyPage() {
       category: '',
       detail: '',
       amount: 0,
+      by: state.settings.currentPerson,
       createdAt: new Date().toISOString(),
     })
   }
@@ -138,6 +145,41 @@ export default function MoneyPage() {
           />
         </Card>
       </div>
+
+
+      {monthAssets.length > 0 && (
+        <Card title="ทรัพย์สินที่ซื้อเดือนนี้" subtitle="เงินที่จ่ายนับเป็นรายจ่ายไปแล้ว แต่มูลค่ายังอยู่กับเรา">
+          <ul className="divide-y divide-line">
+            {monthAssets.map((a) => (
+              <li key={a.id} className="flex items-center gap-3 py-2.5 first:pt-0 last:pb-0">
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-[14.5px] font-medium text-ink">{a.name}</div>
+                  <div className="text-[12.5px] text-ink-3 tnum">
+                    {dateText(a.date)}
+                    {a.unitPrice > 0 && (
+                      <>
+                        {' · '}
+                        {num(a.qty, 4)} {a.unitLabel || 'หน่วย'} ที่ {baht(a.unitPrice, 0)}/{a.unitLabel || 'หน่วย'}
+                      </>
+                    )}
+                  </div>
+                </div>
+                <span className="shrink-0 text-[15px] font-bold tnum text-ink">{baht(a.amount, 0)}</span>
+                <ConfirmButton
+                  onConfirm={() => dispatch({ type: 'asset/delete', id: a.id })}
+                  label="ลบ"
+                  confirmLabel="ยืนยันลบ"
+                  className="btn-ghost btn-sm shrink-0 text-ink-3"
+                />
+              </li>
+            ))}
+          </ul>
+          <div className="mt-3 flex justify-between gap-3 border-t border-line pt-2.5 text-[13.5px]">
+            <span className="font-medium text-ink">รวมทรัพย์สินสะสมทั้งหมด</span>
+            <span className="tnum font-bold text-ink">{money(allAssetValue)}</span>
+          </div>
+        </Card>
+      )}
 
       <div className="flex flex-wrap items-center gap-2">
         <Segmented

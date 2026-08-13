@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { ChatAction, ChatMessage } from '../types'
+import type { ChatAction, ChatChannel, ChatMessage } from '../types'
 import { useStore } from '../lib/store'
 import { Icon } from '../components/ui'
 import { timeText } from '../lib/format'
@@ -11,28 +11,48 @@ const TONE_STYLE: Record<string, { bubble: string; icon: string; iconClass: stri
   info: { bubble: 'border-line bg-surface', icon: 'info', iconClass: 'text-ink-3' },
 }
 
-const QUICK: { label: string; text: string }[] = [
-  { label: 'ซื้อของ', text: 'ซื้อมะม่วง 3 กิโล ราคารวม 112 บาท' },
-  { label: 'ตั้งสูตร', text: 'สูตรเค้กมะม่วง ได้ 20 กล่อง ใช้ มะม่วง 1500 กรัม, กล่อง p39 20 กล่อง' },
-  { label: 'ทำขนม', text: 'ทำเค้กมะม่วง 20 กล่อง' },
-  { label: 'ขาย', text: 'ขายเค้กมะม่วง 15 กล่อง กล่องละ 120' },
-  { label: 'ของเหลือ', text: 'เหลือเค้กมะม่วง 5 กล่อง' },
-  { label: 'ค่าใช้จ่าย', text: 'จ่ายค่าเช่าร้าน 5000 บาท' },
-  { label: 'รายรับอื่น', text: 'รับเงินค่าจ้างทำเค้ก 800 บาท' },
-  { label: 'ถามต้นทุน', text: 'ต้นทุนเค้กมะม่วง กำไร 40%' },
-]
+const QUICK: Record<ChatChannel, { label: string; text: string }[]> = {
+  shop: [
+    { label: 'ซื้อของ', text: 'ซื้อมะม่วง 3 กิโล ราคารวม 112 บาท' },
+    { label: 'ตั้งสูตร', text: 'สูตรเค้กมะม่วง ได้ 20 กล่อง ใช้ มะม่วง 1500 กรัม, กล่อง p39 20 กล่อง' },
+    { label: 'ทำขนม', text: 'ทำเค้กมะม่วง 20 กล่อง' },
+    { label: 'ขาย', text: 'ขายเค้กมะม่วง 15 กล่อง กล่องละ 120' },
+    { label: 'ของเหลือ', text: 'เหลือเค้กมะม่วง 5 กล่อง' },
+    { label: 'ถามต้นทุน', text: 'ต้นทุนเค้กมะม่วง กำไร 40%' },
+  ],
+  money: [
+    { label: 'จ่ายสั้นๆ', text: 'ลูก 100' },
+    { label: 'ค่าอาหาร', text: 'กิน 100' },
+    { label: 'ค่าเช่า', text: 'จ่ายค่าเช่าร้าน 5000 บาท' },
+    { label: 'เงินเข้า', text: '+ รับจ้างทำเค้ก 800' },
+    { label: 'ทรัพย์สิน', text: 'ซื้อทรัพย์สินทองคำ จำนวน 10000 บาท ที่ราคาบาทละ 65000 บาท' },
+  ],
+}
 
-export default function ChatPage({ onNavigate }: { onNavigate: (tab: string, payload?: unknown) => void }) {
+const PLACEHOLDER: Record<ChatChannel, string> = {
+  shop: 'พิมพ์ที่ซื้อมา ที่ทำ หรือที่ขายได้…',
+  money: 'พิมพ์สั้นๆ ได้เลย เช่น ลูก 100',
+}
+
+export default function ChatPage({
+  channel,
+  onNavigate,
+}: {
+  channel: ChatChannel
+  onNavigate: (tab: string, payload?: unknown) => void
+}) {
   const { state, dispatch } = useStore()
   const [text, setText] = useState('')
   const endRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
   const undoableIds = useMemo(() => new Set(state.snapshots.map((s) => s.msgId)), [state.snapshots])
+  const messages = useMemo(() => state.chat.filter((m) => m.channel === channel), [state.chat, channel])
+  const { people, currentPerson } = state.settings
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: 'end' })
-  }, [state.chat.length])
+  }, [messages.length])
 
   // ยืดช่องพิมพ์ตามจำนวนบรรทัด แต่ไม่เกิน 128px แล้วค่อยให้เลื่อนเอง
   useLayoutEffect(() => {
@@ -45,7 +65,7 @@ export default function ChatPage({ onNavigate }: { onNavigate: (tab: string, pay
   function send(value?: string) {
     const payload = (value ?? text).trim()
     if (!payload) return
-    dispatch({ type: 'chat/send', text: payload })
+    dispatch({ type: 'chat/send', text: payload, channel })
     setText('')
     inputRef.current?.focus()
   }
@@ -53,6 +73,12 @@ export default function ChatPage({ onNavigate }: { onNavigate: (tab: string, pay
   function runAction(action: ChatAction) {
     switch (action.kind) {
       case 'undo':
+        break
+      case 'confirmRecipe':
+        dispatch({ type: 'recipe/confirm' })
+        break
+      case 'cancelRecipe':
+        dispatch({ type: 'recipe/cancel' })
         break
       case 'produceThenSell':
         dispatch({
@@ -69,16 +95,39 @@ export default function ChatPage({ onNavigate }: { onNavigate: (tab: string, pay
       case 'openItem':
         onNavigate('stock', { itemId: action.itemId })
         break
+      case 'openSalesDay':
+        onNavigate('sales')
+        break
     }
   }
 
   return (
     <div className="flex h-full flex-col">
+      {people.length > 1 && (
+        <div className="flex shrink-0 items-center gap-2 border-b border-line bg-surface px-4 py-2">
+          <span className="text-[12.5px] text-ink-3">กำลังบันทึกในชื่อ</span>
+          <div className="flex gap-1.5">
+            {people.map((p) => (
+              <button
+                key={p}
+                type="button"
+                onClick={() => dispatch({ type: 'person/switch', name: p })}
+                className={`rounded-lg px-2.5 py-1 text-[12.5px] font-semibold transition-colors ${
+                  p === currentPerson ? 'bg-brand text-brand-ink' : 'bg-surface-2 text-ink-2 hover:bg-surface-3'
+                }`}
+              >
+                {p}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-3 pt-4">
         <div className="mx-auto flex max-w-2xl flex-col gap-3">
-          {state.chat.map((m) =>
+          {messages.map((m) =>
             m.role === 'user' ? (
-              <UserBubble key={m.id} message={m} />
+              <UserBubble key={m.id} message={m} showName={people.length > 1} />
             ) : (
               <BotBubble
                 key={m.id}
@@ -96,7 +145,7 @@ export default function ChatPage({ onNavigate }: { onNavigate: (tab: string, pay
       <div className="border-t border-line bg-surface/95 backdrop-blur px-4 pb-3 pt-2.5">
         <div className="mx-auto max-w-2xl">
           <div className="-mx-4 mb-2 flex gap-2 overflow-x-auto px-4 pb-0.5">
-            {QUICK.map((q) => (
+            {QUICK[channel].map((q) => (
               <button
                 key={q.label}
                 type="button"
@@ -111,7 +160,7 @@ export default function ChatPage({ onNavigate }: { onNavigate: (tab: string, pay
             ))}
             <button
               type="button"
-              onClick={() => dispatch({ type: 'chat/help' })}
+              onClick={() => dispatch({ type: 'chat/help', channel })}
               className="shrink-0 rounded-full border border-line bg-surface-2 px-3 py-1.5 text-[12.5px] font-medium text-brand hover:bg-surface-3"
             >
               ดูคำสั่งทั้งหมด
@@ -130,7 +179,7 @@ export default function ChatPage({ onNavigate }: { onNavigate: (tab: string, pay
                 }
               }}
               rows={1}
-              placeholder="พิมพ์ที่ซื้อมา ที่ทำ หรือที่ขายได้…"
+              placeholder={PLACEHOLDER[channel]}
               className="field flex-1 resize-none overflow-y-auto py-3 leading-snug"
             />
             <button
@@ -152,9 +201,10 @@ export default function ChatPage({ onNavigate }: { onNavigate: (tab: string, pay
   )
 }
 
-function UserBubble({ message }: { message: ChatMessage }) {
+function UserBubble({ message, showName }: { message: ChatMessage; showName: boolean }) {
   return (
-    <div className="flex justify-end">
+    <div className="flex flex-col items-end">
+      {showName && message.by && <span className="mb-0.5 mr-1 text-[11px] text-ink-3">{message.by}</span>}
       <div className="max-w-[85%] rounded-2xl rounded-br-md bg-brand px-3.5 py-2.5 text-[14.5px] leading-relaxed text-brand-ink whitespace-pre-wrap">
         {message.text}
       </div>
@@ -196,9 +246,16 @@ function BotBubble({
         {(canUndo || message.actions?.length) && (
           <div className="mt-3 flex flex-wrap gap-2">
             {message.actions?.map((a, i) => (
-              <button key={i} type="button" onClick={() => onAction(a)} className="btn-outline btn-sm">
+              <button
+                key={i}
+                type="button"
+                onClick={() => onAction(a)}
+                className={a.kind === 'confirmRecipe' ? 'btn-primary btn-sm' : 'btn-outline btn-sm'}
+              >
                 {a.label}
-                <Icon name="chevron" className="size-3.5" />
+                {a.kind !== 'confirmRecipe' && a.kind !== 'cancelRecipe' && (
+                  <Icon name="chevron" className="size-3.5" />
+                )}
               </button>
             ))}
             {canUndo && (

@@ -59,6 +59,18 @@ export type ParsedCommand =
   | { kind: 'adjust'; name: string; qty: number; base: BaseUnit; unitLabel: string; raw: string }
   | { kind: 'expense'; category: string; detail: string; amount: number; raw: string }
   | { kind: 'income'; category: string; detail: string; amount: number; raw: string }
+  | {
+      kind: 'asset'
+      name: string
+      /** เงินที่จ่ายไปทั้งหมด */
+      amount: number
+      /** ราคาต่อหน่วย ถ้าบอกมา */
+      unitPrice?: number
+      /** หน่วยของทรัพย์สิน เช่น บาท (ทอง) */
+      unitLabel?: string
+      raw: string
+    }
+  | { kind: 'confirm'; yes: boolean; raw: string }
   | { kind: 'stock'; name?: string; raw: string }
   | { kind: 'cost'; name: string; marginPct?: number; raw: string }
   | { kind: 'help'; raw: string }
@@ -236,6 +248,7 @@ const INTENTS: { kind: string; re: RegExp }[] = [
   { kind: 'recipe', re: /^(?:สูตร|ตั้งสูตร|เพิ่มสูตร|เมนูใหม่|สร้างเมนู)/ },
   { kind: 'cost', re: /^(?:ต้นทุน|ทุน|คิดราคา|ตั้งราคา|ราคาขาย|คำนวณราคา|ขายเท่าไหร่|ขายเท่าไร)/ },
   { kind: 'stock', re: /^(?:สต็อก|สต๊อก|สตอก|stock|เช็ค|ดูของ|ของเหลือเท่าไหร่|คงเหลือ|มีอะไรบ้าง)/i },
+  { kind: 'asset', re: /^(?:ซื้อทรัพย์สิน|บันทึกทรัพย์สิน|ทรัพย์สิน)\s*/ },
   { kind: 'purchase', re: /^(?:ซื้อ|ซิ้อ|สั่งซื้อ|รับของ|เติมของ|เติม|ลงของ)/ },
   // "จ่าย…" คือค่าใช้จ่ายที่ไม่เข้าสต็อก ส่วน "ซื้อ…" คือของที่เข้าสต็อก
   // ข้อความที่ขึ้นต้นด้วย "ค่า" ตรงๆ (ค่าเช่าร้าน 5000) จับด้วย lookahead เพื่อไม่ให้ตัดคำว่า "ค่า" ทิ้ง
@@ -536,6 +549,92 @@ function parseMoney(kind: 'expense' | 'income', body: string, raw: string): Pars
   return { kind, category, detail, amount, raw }
 }
 
+/**
+ * อ่านการซื้อทรัพย์สิน เช่น
+ *   ซื้อทองคำ จำนวน 10000 บาท ที่ราคาบาทละ 65000 บาท
+ * "จำนวน 10000 บาท" = เงินที่จ่ายไป · "บาทละ 65000" = ราคาต่อหน่วย
+ * ปริมาณที่ได้ = เงินที่จ่าย ÷ ราคาต่อหน่วย
+ */
+function parseAsset(body: string, raw: string): ParsedCommand {
+  let s = body
+
+  // ราคาต่อหน่วย "<หน่วย>ละ <จำนวน>"
+  let unitPrice: number | undefined
+  let unitLabel: string | undefined
+  {
+    const r = cut(s, new RegExp(`(${W}+?)\\s*ละ\\s*(${NUM})\\s*(?:บาท)?`))
+    if (r.m) {
+      // regex จับตั้งแต่ต้นข้อความ จึงอาจติดคำนำหน้ามาด้วย เช่น "ที่ราคาบาท" — ตัดออกให้เหลือแค่หน่วย
+      unitLabel = r.m[1].replace(/^(?:ที่|ใน|ราคา|อัตรา)+/g, '').trim() || undefined
+      unitPrice = parseFloat(r.m[2])
+      s = r.rest
+    }
+  }
+
+  // เงินที่จ่าย
+  let amount: number | null = null
+  for (const src of [
+    `(?:จำนวน|เป็นเงิน|เป็นจำนวน|รวม|ทั้งหมด|มูลค่า)\\s*(${NUM})\\s*(?:บาท)?`,
+    `(${NUM})\\s*บาท`,
+    `(${NUM})`,
+  ]) {
+    const r = cutLast(s, src)
+    if (r.m) {
+      amount = parseFloat(r.m[1])
+      s = r.rest
+      break
+    }
+  }
+
+  if (amount === null || amount <= 0) {
+    return {
+      kind: 'unknown',
+      raw,
+      reason: 'ไม่เจอจำนวนเงิน — ลองพิมพ์เช่น "ซื้อทองคำ จำนวน 10000 บาท ที่ราคาบาทละ 65000 บาท"',
+    }
+  }
+
+  const name = cleanName(s.replace(/^(?:ทรัพย์สิน|สินทรัพย์)\s*/, ''))
+  if (!name) return { kind: 'unknown', raw, reason: 'ไม่เจอชื่อทรัพย์สิน' }
+
+  return { kind: 'asset', name, amount, unitPrice, unitLabel, raw }
+}
+
+/** คำตอบรับ/ปฏิเสธสั้นๆ ตอนบอทถามยืนยัน */
+function parseConfirm(text: string): ParsedCommand | null {
+  if (/^(?:ใช่|ถูก(?:ต้อง)?(?:แล้ว)?|ตกลง|โอเค|ok|yes|y|ยืนยัน|บันทึกเลย|เอาเลย|ได้)\s*[!.]*$/i.test(text)) {
+    return { kind: 'confirm', yes: true, raw: text }
+  }
+  if (/^(?:ไม่(?:ใช่|ถูก)?|ยกเลิก|แก้|ผิด|no|n|cancel)\s*[!.]*$/i.test(text)) {
+    return { kind: 'confirm', yes: false, raw: text }
+  }
+  return null
+}
+
+/**
+ * คำสั่งสั้นในช่องรายรับ-รายจ่าย: "<หมวด> <จำนวน>" หรือ "<จำนวน> <หมวด>"
+ * เช่น "ลูก 100" = รายจ่ายหมวดลูก 100 บาท
+ * ใช้เฉพาะช่องเงิน เพราะในช่องของขาย "มะม่วง 3" อาจหมายถึงจำนวนของ ไม่ใช่เงิน
+ */
+function parseShortMoney(text: string, raw: string): ParsedCommand | null {
+  // ขึ้นต้นด้วย + หมายถึงเงินเข้า
+  const income = /^\+\s*/.test(text)
+  const body = text.replace(/^\+\s*/, '').trim()
+
+  let m = body.match(new RegExp(`^(${W}[\\u0E00-\\u0E7Fa-zA-Z0-9 .]*?)\\s+(${NUM})\\s*(?:บาท)?$`))
+  if (!m) {
+    const flipped = body.match(new RegExp(`^(${NUM})\\s*(?:บาท)?\\s+(${W}[\\u0E00-\\u0E7Fa-zA-Z0-9 .]*)$`))
+    if (flipped) m = [flipped[0], flipped[2], flipped[1]] as unknown as RegExpMatchArray
+  }
+  if (!m) return null
+
+  const category = cleanName(m[1])
+  const amount = parseFloat(m[2])
+  if (!category || !(amount > 0)) return null
+
+  return { kind: income ? 'income' : 'expense', category, detail: '', amount, raw }
+}
+
 function parseCost(body: string, raw: string): ParsedCommand {
   let s = body
   let marginPct: number | undefined
@@ -553,15 +652,32 @@ function parseCost(body: string, raw: string): ParsedCommand {
    จุดเข้าใช้งาน
 -------------------------------------------------------------------------- */
 
+/** ช่องแชทที่กำลังพิมพ์อยู่ — มีผลกับการเดาความหมายของข้อความสั้นๆ */
+export type ParseChannel = 'shop' | 'money'
+
 /** อ่านคำสั่งเดียว (1 บรรทัด) */
-export function parseLine(input: string): ParsedCommand {
+export function parseLine(input: string, channel: ParseChannel = 'shop'): ParsedCommand {
   const raw = input.trim()
   const text = normalizeText(raw)
   if (!text) return { kind: 'unknown', raw, reason: 'ข้อความว่าง' }
 
+  // คำตอบยืนยันสั้นๆ ต้องดูก่อนอย่างอื่น ไม่งั้น "ใช่" จะไปโดนกฎอื่นจับ
+  const confirm = parseConfirm(text)
+  if (confirm) return confirm
+
   const intent = detectIntent(text)
   if (!intent) {
-    // ไม่มีคำนำหน้า แต่ถ้ามีราคา + จำนวน ก็เดาว่าเป็นการซื้อของ
+    if (channel === 'money') {
+      // ช่องเงิน: "ลูก 100" = รายจ่ายหมวดลูก 100 บาท
+      const short = parseShortMoney(text, raw)
+      if (short) return short
+      return {
+        kind: 'unknown',
+        raw,
+        reason: 'ยังไม่เข้าใจข้อความนี้ — พิมพ์สั้นๆ ได้เลย เช่น "ลูก 100" หรือ "+ ขายของ 500" สำหรับเงินเข้า',
+      }
+    }
+    // ช่องของขาย: ไม่มีคำนำหน้า แต่ถ้ามีราคา + จำนวน ก็เดาว่าเป็นการซื้อของ
     if (/บาท/.test(text) && /\d/.test(text)) return parsePurchase(text, raw)
     return {
       kind: 'unknown',
@@ -587,6 +703,8 @@ export function parseLine(input: string): ParsedCommand {
     case 'expense':
     case 'income':
       return parseMoney(intent.kind, intent.rest, raw)
+    case 'asset':
+      return parseAsset(intent.rest, raw)
     case 'cost':
       return parseCost(intent.rest, raw)
     case 'stock': {
@@ -603,13 +721,13 @@ export function parseLine(input: string): ParsedCommand {
  * บรรทัดที่ไม่ได้ขึ้นต้นด้วยคำสั่ง จะสืบทอดคำสั่งจากบรรทัดก่อนหน้า
  * เช่น  "ซื้อมะม่วง 3 กิโล 112 บาท\nแป้งเค้ก 1 กก. 45 บาท"
  */
-export function parseScript(input: string): ParsedCommand[] {
+export function parseScript(input: string, channel: ParseChannel = 'shop'): ParsedCommand[] {
   const text = normalizeText(input)
   const lines = text
     .split('\n')
     .map((l) => l.trim())
     .filter(Boolean)
-  if (lines.length <= 1) return [parseLine(input)]
+  if (lines.length <= 1) return [parseLine(input, channel)]
 
   const out: ParsedCommand[] = []
   let lastVerb = ''
@@ -618,11 +736,11 @@ export function parseScript(input: string): ParsedCommand[] {
     const intent = detectIntent(bullet)
     if (intent) {
       lastVerb = bullet.slice(0, bullet.length - intent.rest.length).trim()
-      out.push(parseLine(bullet))
+      out.push(parseLine(bullet, channel))
     } else if (lastVerb) {
-      out.push(parseLine(`${lastVerb}${bullet}`))
+      out.push(parseLine(`${lastVerb}${bullet}`, channel))
     } else {
-      out.push(parseLine(bullet))
+      out.push(parseLine(bullet, channel))
     }
   }
   return out

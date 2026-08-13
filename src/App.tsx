@@ -9,15 +9,15 @@ import MoneyPage from './pages/MoneyPage'
 import DashboardPage from './pages/DashboardPage'
 import SettingsPage from './pages/SettingsPage'
 
-type TabKey = 'chat' | 'stock' | 'recipes' | 'sales' | 'money' | 'dashboard' | 'settings'
+type TabKey = 'chat' | 'moneychat' | 'sales' | 'money' | 'stock' | 'recipes' | 'dashboard' | 'settings'
 
 const TABS: { key: TabKey; label: string; icon: string }[] = [
-  { key: 'chat', label: 'แชท', icon: 'chat' },
+  { key: 'chat', label: 'ของขาย', icon: 'chat' },
+  { key: 'moneychat', label: 'รายรับจ่าย', icon: 'wallet' },
+  { key: 'sales', label: 'ยอดวัน', icon: 'cart' },
+  { key: 'money', label: 'บัญชี', icon: 'chart' },
   { key: 'stock', label: 'สต็อก', icon: 'box' },
   { key: 'recipes', label: 'เมนู', icon: 'book' },
-  { key: 'sales', label: 'ขาย', icon: 'cart' },
-  { key: 'money', label: 'บัญชี', icon: 'wallet' },
-  { key: 'dashboard', label: 'สรุป', icon: 'chart' },
 ]
 
 interface Focus {
@@ -51,6 +51,17 @@ function Shell() {
         </div>
         <button
           type="button"
+          onClick={() => setTab('dashboard')}
+          aria-label="สรุปภาพรวม"
+          aria-current={tab === 'dashboard' ? 'page' : undefined}
+          className={`rounded-xl p-2 transition-colors ${
+            tab === 'dashboard' ? 'bg-brand-soft text-brand' : 'text-ink-3 hover:bg-surface-2'
+          }`}
+        >
+          <Icon name="chart" />
+        </button>
+        <button
+          type="button"
           onClick={() => setTab('settings')}
           aria-label="ตั้งค่า"
           aria-current={tab === 'settings' ? 'page' : undefined}
@@ -63,7 +74,8 @@ function Shell() {
       </header>
 
       <main className="min-h-0 flex-1 overflow-y-auto">
-        {tab === 'chat' && <ChatPage onNavigate={navigate} />}
+        {tab === 'chat' && <ChatPage channel="shop" onNavigate={navigate} />}
+        {tab === 'moneychat' && <ChatPage channel="money" onNavigate={navigate} />}
         {tab === 'stock' && <StockPage key={focus.nonce} focusItemId={focus.itemId} />}
         {tab === 'recipes' && (
           <RecipePage key={focus.nonce} focus={focus.recipeId || focus.name ? focus : undefined} />

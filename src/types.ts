@@ -176,7 +176,37 @@ export interface Transaction {
   /** รายละเอียดเพิ่มเติม ไม่ใส่ก็ได้ */
   detail: string
   amount: number
+  /** ชื่อคนที่บันทึก — ใช้ตอนทำงานกันสองคน */
+  by: string
   createdAt: string
+}
+
+/**
+ * ทรัพย์สินที่ซื้อเก็บไว้ เช่น ทองคำ
+ * เงินที่จ่ายถือเป็นรายจ่าย (เงินออกจากกระเป๋าจริง) แต่ยังเก็บมูลค่าไว้ดูแยกได้
+ */
+export interface Asset {
+  id: string
+  date: string
+  name: string
+  /** ปริมาณที่ได้มา เช่น 0.1538 (บาททอง) */
+  qty: number
+  /** หน่วยของทรัพย์สิน เช่น บาท (ทอง) กรัม หุ้น */
+  unitLabel: string
+  /** ราคาต่อหน่วยตอนซื้อ */
+  unitPrice: number
+  /** เงินที่จ่ายไปจริง */
+  amount: number
+  by: string
+  createdAt: string
+}
+
+/** ช่องแชท — แยกเรื่องเงินส่วนตัวออกจากเรื่องของขาย */
+export type ChatChannel = 'shop' | 'money'
+
+export const CHANNEL_LABEL: Record<ChatChannel, string> = {
+  shop: 'ของขาย',
+  money: 'รายรับ-รายจ่าย',
 }
 
 export type ChatRole = 'user' | 'bot'
@@ -189,10 +219,17 @@ export type ChatAction =
   | { kind: 'produceThenSell'; label: string; recipeId: string; produceQty: number; sellQty: number; unitPrice: number }
   | { kind: 'openRecipe'; label: string; recipeId?: string; name?: string }
   | { kind: 'openItem'; label: string; itemId: string }
+  | { kind: 'confirmRecipe'; label: string }
+  | { kind: 'cancelRecipe'; label: string }
+  | { kind: 'openSalesDay'; label: string; date: string }
 
 export interface ChatMessage {
   id: string
+  /** ข้อความนี้อยู่ในช่องแชทไหน */
+  channel: ChatChannel
   role: ChatRole
+  /** ชื่อคนที่พิมพ์ (เฉพาะข้อความของผู้ใช้) */
+  by?: string
   text: string
   tone?: ChatTone
   /** รายละเอียดเพิ่มเติมแบบตาราง key: value */
@@ -218,6 +255,10 @@ export interface Settings {
   expenseCategories: string[]
   /** หมวดหมู่รายรับอื่นที่ไม่ใช่การขายขนม */
   incomeCategories: string[]
+  /** คนที่ช่วยกันบันทึก เช่น ["สามี", "ภรรยา"] */
+  people: string[]
+  /** คนที่กำลังบันทึกอยู่ตอนนี้ */
+  currentPerson: string
   theme: 'light' | 'dark' | 'system'
 }
 
@@ -232,7 +273,22 @@ export interface CoreState {
   wastes: Waste[]
   /** รายรับ-รายจ่ายที่บันทึกเอง นอกเหนือจากการขายและการซื้อของ */
   transactions: Transaction[]
+  /** ทรัพย์สินที่ซื้อเก็บไว้ */
+  assets: Asset[]
+  /** สูตรที่บอทถามยืนยันอยู่ ยังไม่บันทึกจนกว่าผู้ใช้จะตอบ */
+  pendingRecipe?: PendingRecipe
   settings: Settings
+}
+
+/** สูตรที่รอผู้ใช้ยืนยันก่อนบันทึกจริง */
+export interface PendingRecipe {
+  name: string
+  yieldQty: number
+  yieldUnit: string
+  ingredients: { name: string; qty: number; base: BaseUnit; unitLabel: string; known: boolean }[]
+  /** true = แก้สูตรเดิมที่มีอยู่แล้ว */
+  isUpdate: boolean
+  raw: string
 }
 
 export interface AppState extends CoreState {
