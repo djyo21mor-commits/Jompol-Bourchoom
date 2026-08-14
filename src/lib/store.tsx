@@ -1,4 +1,14 @@
-import { createContext, useContext, useEffect, useMemo, useReducer, type ReactNode } from 'react'
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react'
 import type {
   AppState,
   ChatChannel,
@@ -30,6 +40,18 @@ import {
   uid,
 } from './engine'
 import { today } from './format'
+import {
+  IDLE_STATUS,
+  loadSyncConfig,
+  mergeShared,
+  pullShop,
+  pushShop,
+  saveSyncConfig,
+  toShared,
+  type SharedState,
+  type SyncConfig,
+  type SyncStatus,
+} from './sync'
 
 const STORAGE_KEY = 'jompol-bakery/v1'
 const MAX_SNAPSHOTS = 20
@@ -212,6 +234,7 @@ export type Action =
   | { type: 'settings/save'; settings: Settings }
   | { type: 'data/replace'; state: AppState }
   | { type: 'data/reset' }
+  | { type: 'sync/adopt'; shared: SharedState; replay: Action[] }
 
 
 /**
@@ -236,7 +259,7 @@ function systemNote(text: string, channel: ChatChannel, tone: ChatMessage['tone'
   return { id: uid('m'), channel, role: 'bot', text, tone, at: new Date().toISOString() }
 }
 
-function reducer(state: AppState, action: Action): AppState {
+export function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
     case 'chat/send': {
       const text = action.text.trim()
@@ -582,6 +605,12 @@ function reducer(state: AppState, action: Action): AppState {
     case 'data/reset':
       return initialState()
 
+    case 'sync/adopt': {
+      // เอาข้อมูลจากเซิร์ฟเวอร์มาเป็นฐาน แล้วทำสิ่งที่เพิ่งพิมพ์ในเครื่องนี้ซ้ำทับลงไป
+      const base = mergeShared(state, action.shared)
+      return action.replay.reduce((s, a) => reducer(s, a), base)
+    }
+
     default:
       return state
   }
@@ -594,12 +623,40 @@ function reducer(state: AppState, action: Action): AppState {
 interface StoreValue {
   state: AppState
   dispatch: React.Dispatch<Action>
+  /** สถานะการซิงค์กับอีกเครื่อง */
+  sync: SyncStatus
+  syncConfig: SyncConfig
+  setSyncConfig: (config: SyncConfig) => void
 }
 
 const StoreContext = createContext<StoreValue | null>(null)
 
 export function StoreProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, undefined, load)
+  const [syncConfig, setSyncConfigState] = useState<SyncConfig>(loadSyncConfig)
+  const [sync, setSync] = useState<SyncStatus>(IDLE_STATUS)
+
+  // คิวของสิ่งที่พิมพ์ไว้แล้วแต่ยังไม่ได้ขึ้นเซิร์ฟเวอร์ — เก็บใน ref เพราะไม่ต้องวาดจอใหม่
+  const queue = useRef<Action[]>([])
+  const latest = useRef(state)
+  latest.current = state
+
+  const dispatchAndQueue = useCallback((action: Action) => {
+    // ข้อมูลจากเซิร์ฟเวอร์ ไม่ต้องส่งกลับขึ้นไปซ้ำ
+    if (action.type !== 'sync/adopt') {
+      queue.current.push(action)
+      // บอกวงจรซิงค์ว่ามีของใหม่ จะได้ไม่ต้องรอครบรอบ
+      window.dispatchEvent(new Event('jompol:changed'))
+    }
+    dispatch(action)
+  }, [])
+
+  const setSyncConfig = useCallback((config: SyncConfig) => {
+    queue.current = []
+    saveSyncConfig(config)
+    setSyncConfigState(config)
+    setSync(config.enabled ? { ...IDLE_STATUS, phase: 'connecting' } : IDLE_STATUS)
+  }, [])
 
   useEffect(() => {
     save(state)
@@ -631,8 +688,154 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     }
   }, [state.settings.theme])
 
-  const value = useMemo(() => ({ state, dispatch }), [state])
+  useShopSync({ config: syncConfig, latest, queue, dispatch, setSync })
+
+  const value = useMemo(
+    () => ({ state, dispatch: dispatchAndQueue, sync, syncConfig, setSyncConfig }),
+    [state, dispatchAndQueue, sync, syncConfig, setSyncConfig],
+  )
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>
+}
+
+/* --------------------------------------------------------------------------
+   วงจรซิงค์ — ดึงข้อมูลใหม่เป็นระยะ และดันของที่พิมพ์ขึ้นไปให้เร็วที่สุด
+-------------------------------------------------------------------------- */
+
+/** ถี่แค่ไหนถึงจะเช็คข้อมูลใหม่ตอนเปิดหน้าจออยู่ */
+const PULL_MS = 6000
+/** พิมพ์เสร็จแล้วรอสักครู่ค่อยส่ง จะได้ไม่ส่งทีละตัวอักษร */
+const PUSH_DELAY_MS = 700
+
+function useShopSync({
+  config,
+  latest,
+  queue,
+  dispatch,
+  setSync,
+}: {
+  config: SyncConfig
+  latest: React.RefObject<AppState>
+  queue: React.RefObject<Action[]>
+  dispatch: React.Dispatch<Action>
+  setSync: React.Dispatch<React.SetStateAction<SyncStatus>>
+}) {
+  useEffect(() => {
+    if (!config.enabled || !config.code) {
+      setSync(IDLE_STATUS)
+      return
+    }
+
+    const abort = new AbortController()
+    let stopped = false
+    let version = 0
+    let lastPushed = ''
+    let timer: number | undefined
+    let running = false
+
+    const ok = () =>
+      setSync({
+        phase: 'ok',
+        lastAt: new Date().toISOString(),
+        pending: queue.current.length,
+        version,
+      })
+
+    const fail = (err: unknown) =>
+      setSync((prev) => ({
+        ...prev,
+        phase: 'error',
+        pending: queue.current.length,
+        message: err instanceof Error ? err.message : 'เชื่อมต่อไม่ได้',
+      }))
+
+    /** เอาข้อมูลจากเซิร์ฟเวอร์มาใช้ แล้วทำสิ่งที่ยังค้างในเครื่องนี้ซ้ำทับ */
+    const adopt = (shared: SharedState, at: number) => {
+      dispatch({ type: 'sync/adopt', shared, replay: [...queue.current] })
+      version = at
+    }
+
+    const push = async (): Promise<void> => {
+      const payload = toShared(latest.current)
+      const body = JSON.stringify(payload)
+      if (body === lastPushed && !queue.current.length) return
+
+      const sending = queue.current.length
+      setSync((prev) => ({ ...prev, phase: 'saving', pending: sending }))
+
+      const res = await pushShop(config.code, version, payload, abort.signal)
+      if (stopped) return
+
+      if (res.ok) {
+        version = res.version
+        lastPushed = body
+        queue.current.splice(0, sending)
+        ok()
+        return
+      }
+
+      // อีกเครื่องบันทึกแทรกไปก่อน — รับของเขามาแล้วทำของเราซ้ำทับ จากนั้นส่งใหม่
+      adopt(res.state, res.version)
+      lastPushed = ''
+      await push()
+    }
+
+    const tick = async () => {
+      if (running || stopped) return
+      running = true
+      try {
+        const res = await pullShop(config.code, version, abort.signal)
+        if (stopped) return
+
+        if (res.state === null) {
+          // ยังไม่มีข้อมูลของรหัสนี้ — ใช้ข้อมูลในเครื่องนี้เป็นชุดตั้งต้น
+          version = res.version
+          lastPushed = ''
+          await push()
+        } else if (!res.unchanged && res.version !== version) {
+          adopt(res.state, res.version)
+          lastPushed = JSON.stringify(res.state)
+          if (queue.current.length) await push()
+          else ok()
+        } else {
+          await push()
+          if (!queue.current.length) ok()
+        }
+      } catch (err) {
+        if (!stopped && !abort.signal.aborted) fail(err)
+      } finally {
+        running = false
+      }
+    }
+
+    const schedule = (ms: number) => {
+      window.clearTimeout(timer)
+      timer = window.setTimeout(() => {
+        void tick().finally(() => schedule(PULL_MS))
+      }, ms)
+    }
+
+    const wake = () => {
+      if (document.visibilityState === 'visible') schedule(0)
+    }
+
+    setSync({ ...IDLE_STATUS, phase: 'connecting' })
+    schedule(0)
+    document.addEventListener('visibilitychange', wake)
+    window.addEventListener('online', wake)
+
+    // พิมพ์อะไรใหม่ ให้รีบส่งขึ้นไปโดยไม่ต้องรอรอบถัดไป
+    const nudge = () => schedule(PUSH_DELAY_MS)
+    window.addEventListener('jompol:changed', nudge)
+
+    return () => {
+      stopped = true
+      abort.abort()
+      window.clearTimeout(timer)
+      document.removeEventListener('visibilitychange', wake)
+      window.removeEventListener('online', wake)
+      window.removeEventListener('jompol:changed', nudge)
+    }
+  }, [config, latest, queue, dispatch, setSync])
 }
 
 export function useStore(): StoreValue {

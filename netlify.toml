@@ -1,0 +1,16 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+  functions = "netlify/functions"
+
+# ที่เก็บข้อมูลกลางของร้าน — ต้องมาก่อนกฎด้านล่าง ไม่งั้นจะโดนส่งไปหน้า index.html แทน
+[[redirects]]
+  from = "/api/shop"
+  to = "/.netlify/functions/shop"
+  status = 200
+
+# แอปเป็นหน้าเดียว เปิด URL ไหนก็ให้ส่ง index.html กลับไป
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

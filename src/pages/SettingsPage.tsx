@@ -8,6 +8,7 @@ import { money, num } from '../lib/format'
 import { suggestPrice } from '../lib/calc'
 import { Card, ConfirmButton, Field, Icon, NumberInput, Segmented } from '../components/ui'
 import LedgerExport from '../components/LedgerExport'
+import SyncSetup from '../components/SyncSetup'
 
 export default function SettingsPage() {
   const { state, dispatch } = useStore()
@@ -195,10 +196,11 @@ export default function SettingsPage() {
           }}
         />
         <p className="mt-2 rounded-xl bg-surface-2 px-3 py-2.5 text-[12.5px] leading-relaxed text-ink-2">
-          ข้อมูลเก็บอยู่ในเครื่องนี้เครื่องเดียว ถ้าใช้คนละมือถือจะยังไม่เห็นข้อมูลของกันและกัน —
-          ให้ใช้เครื่องเดียวกัน หรือส่งไฟล์สำรองให้กันในหน้าถัดไป
+          ถ้าใช้คนละมือถือ ให้เชื่อมข้อมูลเข้าหากันที่หัวข้อ “ใช้ร่วมกันสองเครื่อง” ด้านล่าง
         </p>
       </Card>
+
+      <SyncSetup />
 
       <Card
         title="หมวดหมู่รายรับ-รายจ่าย"
