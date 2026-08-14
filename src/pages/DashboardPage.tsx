@@ -1,16 +1,26 @@
 import { useMemo, useState } from 'react'
 import { useStore } from '../lib/store'
 import { lowStockItems, stockValue, summarize } from '../lib/calc'
-import { baht, dayLabel, money, num, qtyText } from '../lib/format'
+import { addDays, baht, dayLabel, money, num, qtyText, today } from '../lib/format'
+import { forecastMenus } from '../lib/forecast'
 import { DailyBars, MenuRanking } from '../components/Charts'
 import DateRangePicker, { presetRange, rangeLabel } from '../components/DateRange'
+import ForecastCard from '../components/Forecast'
 import { Card, Chip, Empty, Icon, Stat } from '../components/ui'
 
 export default function DashboardPage() {
   const { state } = useStore()
   const [range, setRange] = useState(() => presetRange('7d'))
+  const [servicePct, setServicePct] = useState(80)
   const { from, to } = range
   const s = useMemo(() => summarize(state, from, to), [state, from, to])
+
+  // คาดการณ์ของ "พรุ่งนี้" เสมอ ไม่ว่าจะดูสรุปของช่วงไหน เพราะเป็นตัวช่วยตัดสินใจว่าจะทำอะไรต่อ
+  const tomorrow = addDays(today(), 1)
+  const forecast = useMemo(
+    () => forecastMenus(state, from, to, servicePct, tomorrow),
+    [state, from, to, servicePct, tomorrow],
+  )
 
   const low = useMemo(() => lowStockItems(state.items), [state.items])
   const stockWorth = useMemo(() => stockValue(state.items), [state.items])
@@ -62,6 +72,13 @@ export default function DashboardPage() {
               tone={s.grossProfit >= 0 ? 'good' : 'bad'}
             />
           </div>
+
+          <ForecastCard
+            rows={forecast}
+            servicePct={servicePct}
+            onServiceChange={setServicePct}
+            forLabel="พรุ่งนี้"
+          />
 
           <Card
             title="ยอดขายเทียบต้นทุนรายวัน"
