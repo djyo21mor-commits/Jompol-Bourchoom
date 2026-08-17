@@ -19,7 +19,8 @@ const fakeStore = {
   },
 }
 
-const { handle } = await import('./shop.mjs')
+// อยู่นอกโฟลเดอร์ functions โดยตั้งใจ — Netlify ถือว่าทุกไฟล์ในนั้นเป็นฟังก์ชันที่ต้อง deploy
+const { handle } = await import('./functions/shop.mjs')
 const handler = (req) => handle(req, fakeStore)
 
 const CODE = 'ABC123-DEF456-GHJ789-KLM234'
