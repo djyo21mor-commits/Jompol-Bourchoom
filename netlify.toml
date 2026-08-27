@@ -3,13 +3,18 @@
   publish = "dist"
   functions = "netlify/functions"
 
-# ที่เก็บข้อมูลกลางของร้าน — ต้องมาก่อนกฎด้านล่าง ไม่งั้นจะโดนส่งไปหน้า index.html แทน
+# API งานและการแจ้งเตือน — ต้องมาก่อนกฎ index.html ด้านล่าง
 [[redirects]]
-  from = "/api/shop"
-  to = "/.netlify/functions/shop"
+  from = "/api/tasks"
+  to = "/.netlify/functions/tasks"
   status = 200
 
-# แอปเป็นหน้าเดียว เปิด URL ไหนก็ให้ส่ง index.html กลับไป
+[[redirects]]
+  from = "/api/push"
+  to = "/.netlify/functions/push"
+  status = 200
+
+# แอปหน้าเดียว เปิด URL ไหนก็ส่ง index.html กลับ (ยกเว้นไฟล์จริงกับ /api ข้างบน)
 [[redirects]]
   from = "/*"
   to = "/index.html"
