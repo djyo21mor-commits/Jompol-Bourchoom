@@ -1,124 +1,118 @@
-import { useState } from 'react'
-import { StoreProvider, useStore } from './lib/store'
-import { Icon } from './components/ui'
-import ChatPage from './pages/ChatPage'
-import StockPage from './pages/StockPage'
-import RecipePage from './pages/RecipePage'
-import SalesPage from './pages/SalesPage'
-import MoneyPage from './pages/MoneyPage'
-import DashboardPage from './pages/DashboardPage'
-import SettingsPage from './pages/SettingsPage'
+import { useMemo, useState } from 'react'
+import { useStore } from './lib/store'
+import { countTasks, sortForDisplay, todayYmd, visibleTasks } from './lib/tasks'
+import { TaskForm } from './components/TaskForm'
+import { TaskItem } from './components/TaskItem'
+import { NotifyPanel } from './components/NotifyPanel'
 
-type TabKey = 'chat' | 'moneychat' | 'sales' | 'money' | 'stock' | 'recipes' | 'dashboard' | 'settings'
-
-const TABS: { key: TabKey; label: string; icon: string }[] = [
-  { key: 'chat', label: 'ของขาย', icon: 'chat' },
-  { key: 'moneychat', label: 'รายรับจ่าย', icon: 'wallet' },
-  { key: 'sales', label: 'ยอดวัน', icon: 'cart' },
-  { key: 'money', label: 'บัญชี', icon: 'chart' },
-  { key: 'stock', label: 'สต็อก', icon: 'box' },
-  { key: 'recipes', label: 'เมนู', icon: 'book' },
-]
-
-interface Focus {
-  itemId?: string
-  recipeId?: string
-  name?: string
-  /** เปลี่ยนทุกครั้งที่สั่งเปิด เพื่อให้หน้าปลายทางรู้ว่ามีคำสั่งใหม่ */
-  nonce: number
+const PHASE_LABEL: Record<string, string> = {
+  idle: '',
+  syncing: 'กำลังซิงค์…',
+  ok: 'ซิงค์แล้ว',
+  offline: 'ออฟไลน์ — เก็บไว้ในเครื่องก่อน',
 }
 
-function Shell() {
-  const { state } = useStore()
-  const [tab, setTab] = useState<TabKey>('chat')
-  const [focus, setFocus] = useState<Focus>({ nonce: 0 })
+export default function App() {
+  const store = useStore()
+  const today = todayYmd()
+  const [showDone, setShowDone] = useState(false)
 
-  function navigate(next: string, payload?: unknown) {
-    const p = (payload ?? {}) as { itemId?: string; recipeId?: string; name?: string }
-    setFocus({ ...p, nonce: Date.now() })
-    setTab(next as TabKey)
-  }
+  const tasks = useMemo(() => visibleTasks(store.state.tasks), [store.state.tasks])
+  const counts = useMemo(() => countTasks(tasks, today), [tasks, today])
+  const sorted = useMemo(() => sortForDisplay(tasks, today), [tasks, today])
+
+  const pending = sorted.filter((t) => !t.done)
+  const done = sorted.filter((t) => t.done)
 
   return (
-    <div className="flex h-[100dvh] flex-col bg-plane">
-      <header className="flex shrink-0 items-center gap-3 border-b border-line bg-surface px-4 py-2.5">
-        <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-brand text-brand-ink">
-          <Icon name="calc" className="size-[18px]" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <h1 className="truncate text-[15px] font-bold leading-tight text-ink">{state.settings.shopName}</h1>
-          <p className="truncate text-[12px] text-ink-3">ระบบต้นทุนและสต็อกร้านขนม</p>
-        </div>
-        <button
-          type="button"
-          onClick={() => setTab('dashboard')}
-          aria-label="สรุปภาพรวม"
-          aria-current={tab === 'dashboard' ? 'page' : undefined}
-          className={`rounded-xl p-2 transition-colors ${
-            tab === 'dashboard' ? 'bg-brand-soft text-brand' : 'text-ink-3 hover:bg-surface-2'
-          }`}
-        >
-          <Icon name="chart" />
-        </button>
-        <button
-          type="button"
-          onClick={() => setTab('settings')}
-          aria-label="ตั้งค่า"
-          aria-current={tab === 'settings' ? 'page' : undefined}
-          className={`rounded-xl p-2 transition-colors ${
-            tab === 'settings' ? 'bg-brand-soft text-brand' : 'text-ink-3 hover:bg-surface-2'
-          }`}
-        >
-          <Icon name="gear" />
-        </button>
-      </header>
+    <div className="min-h-screen">
+      <div className="mx-auto w-full max-w-xl px-4 pb-24 pt-6 flex flex-col gap-4">
+        <header className="flex items-end justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight">งานค้าง</h1>
+            <p className="text-sm" style={{ color: 'var(--ink-2)' }}>
+              เตือนทุกเช้า 7 โมง ว่ามีอะไรต้องส่งบ้าง
+            </p>
+          </div>
+          <span className="text-xs" style={{ color: 'var(--ink-3)' }}>
+            {PHASE_LABEL[store.phase]}
+          </span>
+        </header>
 
-      <main className="min-h-0 flex-1 overflow-y-auto">
-        {tab === 'chat' && <ChatPage channel="shop" onNavigate={navigate} />}
-        {tab === 'moneychat' && <ChatPage channel="money" onNavigate={navigate} />}
-        {tab === 'stock' && <StockPage key={focus.nonce} focusItemId={focus.itemId} />}
-        {tab === 'recipes' && (
-          <RecipePage key={focus.nonce} focus={focus.recipeId || focus.name ? focus : undefined} />
+        <div className="grid grid-cols-3 gap-2">
+          <Stat label="ค้างทั้งหมด" value={counts.pending} tone="ink" />
+          <Stat label="เลยกำหนด" value={counts.overdue} tone="overdue" />
+          <Stat label="ครบวันนี้" value={counts.today} tone="today" />
+        </div>
+
+        <NotifyPanel code={store.code} onChangeCode={store.changeCode} />
+
+        <TaskForm onAdd={store.addTask} />
+
+        {pending.length === 0 ? (
+          <div className="card p-8 text-center" style={{ color: 'var(--ink-3)' }}>
+            <div className="text-3xl mb-2">🎉</div>
+            ไม่มีงานค้าง เพิ่มงานใหม่ได้เลย
+          </div>
+        ) : (
+          <ul className="flex flex-col gap-2.5">
+            {pending.map((t) => (
+              <TaskItem
+                key={t.id}
+                task={t}
+                today={today}
+                onToggle={() => store.toggleDone(t.id)}
+                onEdit={(patch) => store.editTask(t.id, patch)}
+                onRemove={() => store.removeTask(t.id)}
+              />
+            ))}
+          </ul>
         )}
-        {tab === 'sales' && <SalesPage />}
-        {tab === 'money' && <MoneyPage />}
-        {tab === 'dashboard' && <DashboardPage />}
-        {tab === 'settings' && <SettingsPage />}
-      </main>
 
-      <nav
-        aria-label="เมนูหลัก"
-        className="shrink-0 border-t border-line bg-surface pb-[env(safe-area-inset-bottom)]"
-      >
-        <ul className="mx-auto flex max-w-2xl">
-          {TABS.map((t) => {
-            const active = tab === t.key
-            return (
-              <li key={t.key} className="flex-1">
-                <button
-                  type="button"
-                  onClick={() => setTab(t.key)}
-                  aria-current={active ? 'page' : undefined}
-                  className={`flex w-full flex-col items-center gap-0.5 py-2 transition-colors ${
-                    active ? 'text-brand' : 'text-ink-3 hover:text-ink-2'
-                  }`}
-                >
-                  <Icon name={t.icon} className="size-[22px]" />
-                  <span className="text-[11px] font-medium">{t.label}</span>
-                </button>
-              </li>
-            )
-          })}
-        </ul>
-      </nav>
+        {done.length > 0 && (
+          <div className="flex flex-col gap-2.5">
+            <button
+              className="text-sm self-start"
+              style={{ color: 'var(--ink-3)' }}
+              onClick={() => setShowDone((v) => !v)}
+            >
+              {showDone ? 'ซ่อน' : 'ดู'}งานที่เสร็จแล้ว ({done.length})
+            </button>
+            {showDone && (
+              <ul className="flex flex-col gap-2.5">
+                {done.map((t) => (
+                  <TaskItem
+                    key={t.id}
+                    task={t}
+                    today={today}
+                    onToggle={() => store.toggleDone(t.id)}
+                    onEdit={(patch) => store.editTask(t.id, patch)}
+                    onRemove={() => store.removeTask(t.id)}
+                  />
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+
+        <footer className="pt-4 text-center text-xs" style={{ color: 'var(--ink-3)' }}>
+          ข้อมูลเก็บบนเครื่องและซิงค์ตามรหัสของคุณ
+        </footer>
+      </div>
     </div>
   )
 }
 
-export default function App() {
+function Stat({ label, value, tone }: { label: string; value: number; tone: 'ink' | 'overdue' | 'today' }) {
+  const color = tone === 'overdue' ? 'var(--overdue)' : tone === 'today' ? 'var(--today)' : 'var(--ink)'
   return (
-    <StoreProvider>
-      <Shell />
-    </StoreProvider>
+    <div className="card p-3 text-center">
+      <div className="text-2xl font-bold" style={{ color: value > 0 ? color : 'var(--ink-3)' }}>
+        {value}
+      </div>
+      <div className="text-xs" style={{ color: 'var(--ink-2)' }}>
+        {label}
+      </div>
+    </div>
   )
 }
